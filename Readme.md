@@ -6,7 +6,7 @@ This project uses [playground]() as a library. `playground` and `emitrtl` direct
 ```
   workspace
   |-- playground
-  |-- redefine-header
+  |-- emitrtl
 ```
 Make sure that you have a working [playground](https://github.com/morphingmachines/playground.git) project before proceeding further. And donot rename/modify `playground` directory structure.
 
