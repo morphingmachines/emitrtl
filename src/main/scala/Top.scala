@@ -1,11 +1,31 @@
 package emitrtl
 
+import chisel3._
 import circt.stage.ChiselStage
 import freechips.rocketchip.diplomacy.LazyModule
 import freechips.rocketchip.util.ElaborationArtefacts
 
 import java.io._
 import java.nio.file._
+
+trait TestHarnessShell extends Module {
+  val io = IO(new Bundle { val success = Output(Bool()) })
+}
+
+//dut is passed as call-by-name parameter as Module instantiate should be wrapped in Module()
+class TestHarness(dut: => TestHarnessShell) extends Module {
+  val io   = IO(new Bundle { val success = Output(Bool()) })
+  val inst = Module(dut)
+  io.success := inst.io.success
+  /*
+  val count = RegInit(0.U(1.W))
+  inst.io.start := false.B
+  when(count =/= 1.U) {
+    inst.io.start := true.B
+    count         := count + 1.U
+  }
+   */
+}
 
 trait Toplevel {
   def topModule: chisel3.RawModule
@@ -72,6 +92,72 @@ trait LazyToplevel extends Toplevel {
     gen.getChildren.map(x => println("Class Type: " + x.getClass.getName() + "| Instance name:" + x.name))
   }
 
+}
+
+trait VerilateTestHarness { this: Toplevel =>
+  def dut: TestHarnessShell
+
+  override def topModule      = new TestHarness(dut)
+  override def topModule_name = dut.getClass().getName().split("\\$").mkString(".")
+
+  val rocketchip_resource_path = s"${os.pwd.toString()}/../playground/dependencies/rocket-chip/src/main/resources"
+
+  val extra_rtl_src = Seq("/vsrc/EICG_wrapper.v").map(i => rocketchip_resource_path + i)
+  // riscv-tools installation path
+  val spike_install_path = sys.env.get("RISCV") match {
+    case Some(value) => value
+    case None        => throw new Exception("Environment variable \"RISCV\" is no defined!")
+  }
+
+  def CFLAGS(extra_flags: Seq[String]): Seq[String] = {
+    val default = Seq("-std=c++17", "-DVERILATOR", s"-I${spike_install_path}/include")
+    val opts    = default ++ extra_flags
+    opts.map(i => Seq("-CFLAGS", i)).flatten
+  }
+
+  def LDFLAGS(extra_flags: Seq[String]): Seq[String] = {
+    val default = Seq(s"-L${spike_install_path}/lib", "-lfesvr", "-lriscv", "-lpthread")
+    val opts    = default ++ extra_flags
+    opts.map(i => Seq("-LDFLAGS", i)).flatten
+  }
+
+  def verilate(
+    emitrtl_path:  String = s"${os.pwd.toString()}/dependencies/emitrtl",
+    extra_CFLAGS:  Seq[String] = Seq(),
+    extra_LDFLAGS: Seq[String] = Seq(),
+    extras_src:    Seq[String] = Seq(),
+  ) = {
+    val cmd =
+      Seq("verilator", "-Wno-LATCH", "-Wno-WIDTH", "--cc") ++ CFLAGS(extra_CFLAGS) ++ LDFLAGS(
+        extra_LDFLAGS,
+      ) ++
+        extras_src ++ extra_rtl_src ++
+        Seq(
+          "-f",
+          "filelist.f",
+          "--top-module",
+          "TestHarness",
+          "--trace",
+          "--vpi",
+          "--exe",
+          s"${emitrtl_path}/src/main/resources/csrc/test_tb_top.cpp",
+        )
+    println(s"LOG: command invoked \"${cmd.mkString(" ")}\"")
+    os.proc(cmd).call(cwd = os.Path(s"${os.pwd.toString()}/${out_dir}"), stdout = os.Inherit)
+  }
+
+  def build() = {
+    val cmd = Seq("make", "-j", "-C", "obj_dir/", "-f", s"VTestHarness.mk")
+    println(s"LOG: command invoked \"${cmd.mkString(" ")}\"")
+    os.proc(cmd).call(cwd = os.Path(s"${os.pwd.toString()}/${out_dir}"), stdout = os.Inherit)
+    println(s"VTestHarness executable in ./generated_sv_dir/${topModule_name}/obj_dir directory.")
+    println(s"Run simulation using: ./VTestHarness <foo.elf")
+  }
+}
+
+trait WithLazyModuleDUT { this: VerilateTestHarness with LazyToplevel =>
+  override def dut            = lazyTop.module.asInstanceOf[TestHarnessShell]
+  override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
 }
 
 /** To run from a terminal shell
