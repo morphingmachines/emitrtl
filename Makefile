@@ -8,10 +8,10 @@ TARGET ?= TestTop
 
 # Targets
 rtl:## Generates Verilog code from Chisel sources (output to ./generated_sv_dir)
-	$(MILL) $(project).runMain redefine.emitrtl.genRTLMain $(TARGET)
+	$(MILL) $(project).runMain emitrtl.genRTLMain $(TARGET)
 
 lazyrtl:## Generates Verilog code from Chisel sources (output to ./generated_sv_dir)
-	$(MILL) $(project).runMain redefine.emitrtl.genLazyRTLMain $(TARGET)
+	$(MILL) $(project).runMain emitrtl.genLazyRTLMain $(TARGET)
 
 .PHONY: lint
 lint: ## Formats code using scalafmt and scalafix

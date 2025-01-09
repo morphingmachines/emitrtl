@@ -2,8 +2,8 @@ package emitrtl
 
 import chisel3._
 import circt.stage.ChiselStage
-import freechips.rocketchip.diplomacy.LazyModule
 import freechips.rocketchip.util.ElaborationArtefacts
+import org.chipsalliance.diplomacy.lazymodule.LazyModule
 
 import java.io._
 import java.nio.file._

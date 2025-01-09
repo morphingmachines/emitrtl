@@ -30,6 +30,19 @@ object mycde extends ^.playground.dependencies.cde.build.CDE with PublishModule 
   override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "cde" / "cde"
 }
 
+object mydiplomacy
+  extends ^.playground.dependencies.diplomacy.common.DiplomacyModule
+  with ^.playground.build.CommonModule {
+  override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "diplomacy" / "diplomacy"
+  override def scalaVersion   = ^.playground.build.ivys.sv
+  def chiselModule            = None
+  def chiselPluginJar         = None
+  def chiselIvy               = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._1)
+  def chiselPluginIvy         = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._2)
+  def sourcecodeIvy           = ^.playground.build.ivys.sourcecode
+  def cdeModule               = mycde
+}
+
 object myrocketchip extends ^.playground.dependencies.`rocket-chip`.common.RocketChipModule with SbtModule {
 
   override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "rocket-chip"
@@ -52,6 +65,8 @@ object myrocketchip extends ^.playground.dependencies.`rocket-chip`.common.Rocke
   def hardfloatModule: ScalaModule = myhardfloat
 
   def cdeModule: ScalaModule = mycde
+
+  def diplomacyModule: ScalaModule = mydiplomacy
 
   def mainargsIvy = ^.playground.build.ivys.mainargs
 

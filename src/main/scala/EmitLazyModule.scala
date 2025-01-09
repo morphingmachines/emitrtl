@@ -6,17 +6,10 @@ package emitrtl
 import chisel3._
 import chisel3.experimental.SourceInfo
 import chisel3.util.random.FibonacciLFSR
-import freechips.rocketchip.diplomacy.{
-  LazyModule,
-  LazyModuleImp,
-  NexusNode,
-  RenderedEdge,
-  SimpleNodeImp,
-  SinkNode,
-  SourceNode,
-  ValName,
-}
 import org.chipsalliance.cde.config.Parameters
+import org.chipsalliance.diplomacy.ValName
+import org.chipsalliance.diplomacy.lazymodule.{LazyModule, LazyModuleImp}
+import org.chipsalliance.diplomacy.nodes.{NexusNode, RenderedEdge, SimpleNodeImp, SinkNode, SourceNode}
 
 case class UpwardParam(width: Int)
 case class DownwardParam(width: Int)
