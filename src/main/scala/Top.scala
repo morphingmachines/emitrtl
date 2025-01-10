@@ -3,7 +3,8 @@ package emitrtl
 import chisel3._
 import circt.stage.ChiselStage
 import freechips.rocketchip.util.ElaborationArtefacts
-import org.chipsalliance.diplomacy.lazyModule.LazyModule
+import org.chipsalliance.diplomacy.lazymodule.LazyModule
+import chipyard.stage._
 
 import java.io._
 import java.nio.file._
@@ -68,7 +69,10 @@ trait SynthToplevel {
   def synthTopModule: chisel3.RawModule
   def synthTopModule_name = synthTopModule.getClass().getName().split("\\$").mkString(".")
 
-  def synth_out_dir = s"generated_sv_dir/vlsi/${synthTopModule_name}"
+  def synthConfig_name : String  // $(CONFIG_PACKAGE):$(CONFIG)
+  def annoName = s"${synthTopModule_name}.${synthConfig_name.split(":")(1)}"
+
+  def synth_out_dir = s"generated_sv_dir/vlsi/${annoName}"
   def collateral_out_dir = s"${synth_out_dir}/gen-collateral"
 
   /** For firtoolOpts run `firtool --help` There is an overlap between ChiselStage args and firtoolOpts.
@@ -78,6 +82,20 @@ trait SynthToplevel {
 
   lazy val synthChiselArgs   = Array("--full-stacktrace", "--target-dir", synth_out_dir, "--split-verilog")
   lazy val synthFirtroolArgs = Array("-dedup")
+
+  lazy val annoArgs = Array("--target-dir", synth_out_dir, "--name", annoName, 
+    "--legacy-configs", synthConfig_name, "--top-module", synthTopModule_name)
+
+  def chipyardAnno(): Unit = (new ChipyardStage).execute(annoArgs, Seq.empty)
+  //def chiselAnno(): Unit = try {
+  //    (new ChipyardStage).execute(args, Seq.empty)
+  //} catch {
+  //  case a: StageError =>
+  //    System.exit(a.code.number)
+  //  case a: OptionsException =>
+  //    StageUtils.dramaticUsageError(a.message)
+  //    System.exit(1)
+  //}
 
   def chisel2synthFirrtl() = {
     val str_synthFirrtl = ChiselStage.emitCHIRRTL(synthTopModule, args = Array("--full-stacktrace"))
@@ -91,35 +109,63 @@ trait SynthToplevel {
                              s"disallowLocalVariables,verifLabels," +
                              s"disallowPortDeclSharing," +
                              s"locationInfoStyle=wrapInAtSquareBracket"
-  //def mfc_smems_conf  = s"generated_sv_dir/vlsi/${synthTopModule_name}.mems.conf"
-  //def anno_file       = s"generated_sv_dir/vlsi/${synthTopModule_name}.anno.json"
-  //def final_anno_file = s"generated_sv_dir/vlsi/${synthTopModule_name}.appended.anno.json"
-  def mfc_smems_conf  = s"${synthTopModule_name}.mems.conf"
-  def anno_file       = s"${synthTopModule_name}.anno.json"
-  def final_anno_file = s"${synthTopModule_name}.appended.anno.json"
+  def mfc_smems_conf  = s"${annoName}.mems.conf"
+  def anno_file       = s"${synth_out_dir}/${annoName}.anno.json"
+  def final_anno_file = s"${annoName}.appended.anno.json"
 
   // Call this only after calling chisel2firrtl()
   def synthFirrtl2synthSV() =
-   os.proc(
-     "firtool",
-     "--format=fir",                      //extra
-     "--export-module-hierarchy",         //extra
-		 "--verify-each=true",                //extra
-		 "--warn-on-unprocessed-annotations", //extra
-     "--disable-annotation-classless",    //extra
-     "--disable-annotation-unknown",
-     "--mlir-timing",                     //extra
-     s"--lowering-options=${mfc_lowering_options}", //extra
-     //"--strip-debug-info",
-     //"--lower-memories",
-     "--repl-seq-mem",                    //extra
-		 s"--repl-seq-mem-file=${mfc_smems_conf}", //extra
-		 //s"--annotation-file=$(final_anno_file)",
-     s"--output-annotation-file=${anno_file}",
-     "--split-verilog",
-     s"-o=${collateral_out_dir}",
-     s"${synth_out_dir}.fir",
-   ).call(stdout = os.Inherit) // check additional options with "firtool --help"
+    os.proc(
+      "firtool",
+      "--format=fir",                      //extra
+      "--export-module-hierarchy",         //extra
+		  "--verify-each=true",                //extra
+		  "--warn-on-unprocessed-annotations", //extra
+      "--disable-annotation-classless",    //extra
+      "--disable-annotation-unknown",
+      "--mlir-timing",                     //extra
+      s"--lowering-options=${mfc_lowering_options}", //extra
+      //"--strip-debug-info",
+      //"--lower-memories",
+      "--repl-seq-mem",                    //extra
+		  s"--repl-seq-mem-file=${mfc_smems_conf}", //extra
+		  s"--annotation-file=${anno_file}",
+      "--split-verilog",
+      s"-o=${collateral_out_dir}",
+      s"${synth_out_dir}.fir",
+    ).call(stdout = os.Inherit) // check additional options with "firtool --help"
+
+  def firrtl_blackbox_filelist = s"${collateral_out_dir}/firrtl_black_box_resource_files.f"
+
+  def uniquifyModuleNames() : Unit = {
+    // need trailing space for SFC macrocompiler
+    os.proc(
+      "sed -i 's/.*/& /'",
+      s"${synth_out_dir}/${mfc_smems_conf}"
+    )
+
+    //  if there are no BB's then the file might not be generated, instead always generate it
+    os.proc(
+      "touch",
+      s"${firrtl_blackbox_filelist}"
+    )
+
+    // Uniquify module names so there's no conflict between synthesis-runs and simulation-runs
+    os.proc(
+      "/home/sumana/Desktop/Workspace/redefine-workspace/playground/dependencies/chipyard/scripts/uniquify-module-names.py",
+      //s"--model-hier-json ${}",
+      //s"--top-hier-json ${}",
+      s"--in-all-filelist ${collateral_out_dir}/filelist.f",
+      s"--in-bb-filelist ${firrtl_blackbox_filelist}",
+      s"--dut AccelRRM",
+      //s"--model ",
+      s"--target-dir ${collateral_out_dir}",
+      s"--out-dut-filelist ${synth_out_dir}/${annoName}.top.f",
+      //s"--out-model-filelist ",
+      //s"--out-model-hier-json ",
+      s"--gcpath ${collateral_out_dir}"
+    ) 
+  }
 
 }
 
@@ -129,6 +175,9 @@ trait LazyToplevel extends Toplevel with SynthToplevel {
   override def synthTopModule = lazyTop.module.asInstanceOf[chisel3.RawModule]
   override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
   override def synthTopModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
+
+  // default synth Config
+  override def synthConfig_name : String = "None:None" // $(CONFIG_PACKAGE):$(CONFIG)
 
   def genDiplomacyGraph() = {
     ElaborationArtefacts.add("graphml", lazyTop.graphML)
