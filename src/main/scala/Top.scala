@@ -3,7 +3,7 @@ package emitrtl
 import chisel3._
 import circt.stage.ChiselStage
 import freechips.rocketchip.util.ElaborationArtefacts
-import org.chipsalliance.diplomacy.lazymodule.LazyModule
+import org.chipsalliance.diplomacy.lazyModule.LazyModule
 
 import java.io._
 import java.nio.file._
@@ -64,10 +64,71 @@ trait Toplevel {
 
 }
 
-trait LazyToplevel extends Toplevel {
+trait SynthToplevel {
+  def synthTopModule: chisel3.RawModule
+  def synthTopModule_name = synthTopModule.getClass().getName().split("\\$").mkString(".")
+
+  def synth_out_dir = s"generated_sv_dir/vlsi/${synthTopModule_name}"
+  def collateral_out_dir = s"${synth_out_dir}/gen-collateral"
+
+  /** For firtoolOpts run `firtool --help` There is an overlap between ChiselStage args and firtoolOpts.
+    *
+    * TODO: Passing "--Split-verilog" "--output-annotation-file" to firtool is not working.
+    */
+
+  lazy val synthChiselArgs   = Array("--full-stacktrace", "--target-dir", synth_out_dir, "--split-verilog")
+  lazy val synthFirtroolArgs = Array("-dedup")
+
+  def chisel2synthFirrtl() = {
+    val str_synthFirrtl = ChiselStage.emitCHIRRTL(synthTopModule, args = Array("--full-stacktrace"))
+    Files.createDirectories(Paths.get("generated_sv_dir/vlsi"))
+    val pwSynth = new PrintWriter(new File(s"${synth_out_dir}.fir"))
+    pwSynth.write(str_synthFirrtl)
+    pwSynth.close()
+  }
+
+  def mfc_lowering_options = s"emittedLineLength=2048,noAlwaysComb," +
+                             s"disallowLocalVariables,verifLabels," +
+                             s"disallowPortDeclSharing," +
+                             s"locationInfoStyle=wrapInAtSquareBracket"
+  //def mfc_smems_conf  = s"generated_sv_dir/vlsi/${synthTopModule_name}.mems.conf"
+  //def anno_file       = s"generated_sv_dir/vlsi/${synthTopModule_name}.anno.json"
+  //def final_anno_file = s"generated_sv_dir/vlsi/${synthTopModule_name}.appended.anno.json"
+  def mfc_smems_conf  = s"${synthTopModule_name}.mems.conf"
+  def anno_file       = s"${synthTopModule_name}.anno.json"
+  def final_anno_file = s"${synthTopModule_name}.appended.anno.json"
+
+  // Call this only after calling chisel2firrtl()
+  def synthFirrtl2synthSV() =
+   os.proc(
+     "firtool",
+     "--format=fir",                      //extra
+     "--export-module-hierarchy",         //extra
+		 "--verify-each=true",                //extra
+		 "--warn-on-unprocessed-annotations", //extra
+     "--disable-annotation-classless",    //extra
+     "--disable-annotation-unknown",
+     "--mlir-timing",                     //extra
+     s"--lowering-options=${mfc_lowering_options}", //extra
+     //"--strip-debug-info",
+     //"--lower-memories",
+     "--repl-seq-mem",                    //extra
+		 s"--repl-seq-mem-file=${mfc_smems_conf}", //extra
+		 //s"--annotation-file=$(final_anno_file)",
+     s"--output-annotation-file=${anno_file}",
+     "--split-verilog",
+     s"-o=${collateral_out_dir}",
+     s"${synth_out_dir}.fir",
+   ).call(stdout = os.Inherit) // check additional options with "firtool --help"
+
+}
+
+trait LazyToplevel extends Toplevel with SynthToplevel {
   def lazyTop: LazyModule
   override def topModule      = lazyTop.module.asInstanceOf[chisel3.RawModule]
+  override def synthTopModule = lazyTop.module.asInstanceOf[chisel3.RawModule]
   override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
+  override def synthTopModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
 
   def genDiplomacyGraph() = {
     ElaborationArtefacts.add("graphml", lazyTop.graphML)
