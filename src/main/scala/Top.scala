@@ -9,6 +9,8 @@ import chipyard.stage._
 import java.io._
 import java.nio.file._
 
+import sys.process._
+
 trait TestHarnessShell extends Module {
   val io = IO(new Bundle { val success = Output(Bool()) })
 }
@@ -56,9 +58,9 @@ trait Toplevel {
       "firtool",
       s"${out_dir}.fir",
       "--disable-annotation-unknown",
-      "--split-verilog",
       // "--strip-debug-info",
       "--lower-memories",
+      "--split-verilog",
       s"-o=${out_dir}",
       s"--output-annotation-file=${out_dir}/${topModule_name}.anno.json",
     ).call(stdout = os.Inherit) // check additional options with "firtool --help"
@@ -72,6 +74,7 @@ trait SynthToplevel {
   def synthConfig_name : String  // $(CONFIG_PACKAGE):$(CONFIG)
   def annoName = s"${synthTopModule_name}.${synthConfig_name.split(":")(1)}"
 
+  def curr_dir : String = os.pwd.toString
   def synth_out_dir = s"generated_sv_dir/vlsi/${annoName}"
   def collateral_out_dir = s"${synth_out_dir}/gen-collateral"
 
@@ -86,7 +89,62 @@ trait SynthToplevel {
   lazy val annoArgs = Array("--target-dir", synth_out_dir, "--name", annoName, 
     "--legacy-configs", synthConfig_name, "--top-module", synthTopModule_name)
 
-  def chipyardAnno(): Unit = (new ChipyardStage).execute(annoArgs, Seq.empty)
+  def mfc_top_hrchy_json = s"${curr_dir}"+
+                           s"/${synth_out_dir}/top_module_hierarchy.json"
+
+  def mfc_extra_anno_contents = {
+    s"""
+    [
+      {
+		    "class": "sifive.enterprise.firrtl.ModuleHierarchyAnnotation",
+		    "filename": "${mfc_top_hrchy_json}"
+	    }
+    ]
+    """
+  }
+
+  def mfc_lowering_options = s"emittedLineLength=2048,noAlwaysComb," +
+                             s"disallowLocalVariables,verifLabels," +
+                             s"disallowPortDeclSharing," +
+                             s"locationInfoStyle=wrapInAtSquareBracket"
+
+  def mfc_smems_conf  = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.mems.conf"
+  def anno_file       = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.anno.json"
+  def extra_anno_file = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.extrafirtool.anno.json"
+  def final_anno_file = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.appended.anno.json"
+
+  def create_final_anno_file() : Unit = {
+    os.proc(
+      "rm",
+      "-rf",
+      s"${extra_anno_file}"
+    ).call(stdout = os.Inherit)
+
+    os.write(
+      os.Path(s"${extra_anno_file}"),
+      s"${mfc_extra_anno_contents}",
+    )
+
+    Seq("jq","-s","[.[][]]", s"${anno_file}", s"${extra_anno_file}", ">", s"${final_anno_file}").!
+
+    //os.proc(
+    //  "jq -s '[.[][]]'",
+    //  s"${anno_file}",
+    //  s"${extra_anno_file}",
+      //"\'firrtl\'",
+      //"blah2.json"
+      //"/home/sumana/Desktop/Workspace/redefine-workspace/RRM/generated_sv_dir/vlsi/rrm.syn.AccelRRM.RRMConfig/rrm.syn.AccelRRM.RRMConfig.anno.json"
+      //"/home/sumana/Desktop/Workspace/redefine-workspace/RRM/generated_sv_dir/vlsi/rrm.syn.AccelRRM.RRMConfig/rrm.syn.AccelRRM.RRMConfig.extrafirtoo2.anno.json"
+      //s"${anno_file}"
+    //  ">",
+    //  s"${final_anno_file}"
+    //).call(stdout = os.Inherit)
+  }
+
+  def chipyardAnno(): Unit = {
+    //(new ChipyardStage).execute(annoArgs, Seq.empty)
+    create_final_anno_file()
+  }
   //def chiselAnno(): Unit = try {
   //    (new ChipyardStage).execute(args, Seq.empty)
   //} catch {
@@ -97,24 +155,18 @@ trait SynthToplevel {
   //    System.exit(1)
   //}
 
-  def chisel2synthFirrtl() = {
-    val str_synthFirrtl = ChiselStage.emitCHIRRTL(synthTopModule, args = Array("--full-stacktrace"))
-    Files.createDirectories(Paths.get("generated_sv_dir/vlsi"))
-    val pwSynth = new PrintWriter(new File(s"${synth_out_dir}.fir"))
-    pwSynth.write(str_synthFirrtl)
-    pwSynth.close()
-  }
+  //def chisel2synthFirrtl() = {
+  //  val str_synthFirrtl = ChiselStage.emitCHIRRTL(synthTopModule, args = Array("--full-stacktrace"))
+  //  Files.createDirectories(Paths.get("generated_sv_dir/vlsi"))
+  //  val pwSynth = new PrintWriter(new File(s"${synth_out_dir}.fir"))
+  //  pwSynth.write(str_synthFirrtl)
+  //  pwSynth.close()
+  //}
 
-  def mfc_lowering_options = s"emittedLineLength=2048,noAlwaysComb," +
-                             s"disallowLocalVariables,verifLabels," +
-                             s"disallowPortDeclSharing," +
-                             s"locationInfoStyle=wrapInAtSquareBracket"
-  def mfc_smems_conf  = s"${annoName}.mems.conf"
-  def anno_file       = s"${synth_out_dir}/${annoName}.anno.json"
-  def final_anno_file = s"${annoName}.appended.anno.json"
+  def fir_file = s"${curr_dir}/${synth_out_dir}/${annoName}.fir"
 
-  // Call this only after calling chisel2firrtl()
-  def synthFirrtl2synthSV() =
+  // Call this only after calling chipyardAnno()
+  def synthFirrtl2synthSV() = 
     os.proc(
       "firtool",
       "--format=fir",                      //extra
@@ -129,42 +181,39 @@ trait SynthToplevel {
       //"--lower-memories",
       "--repl-seq-mem",                    //extra
 		  s"--repl-seq-mem-file=${mfc_smems_conf}", //extra
-		  s"--annotation-file=${anno_file}",
+		  s"--annotation-file=${final_anno_file}",
       "--split-verilog",
       s"-o=${collateral_out_dir}",
-      s"${synth_out_dir}.fir",
+      s"${fir_file}",
     ).call(stdout = os.Inherit) // check additional options with "firtool --help"
 
   def firrtl_blackbox_filelist = s"${collateral_out_dir}/firrtl_black_box_resource_files.f"
 
   def uniquifyModuleNames() : Unit = {
-    // need trailing space for SFC macrocompiler
-    os.proc(
-      "sed -i 's/.*/& /'",
-      s"${synth_out_dir}/${mfc_smems_conf}"
-    )
 
-    //  if there are no BB's then the file might not be generated, instead always generate it
-    os.proc(
-      "touch",
-      s"${firrtl_blackbox_filelist}"
-    )
+    Seq("sed", "-i", "s/.*/& /", "/home/sumana/Desktop/Workspace/redefine-workspace/RRM/generated_sv_dir/vlsi/rrm.syn.AccelRRM.RRMConfig/rrm.syn.AccelRRM.RRMConfig.mems.conf").!
+
+    ////  if there are no BB's then the file might not be generated, instead always generate it
+    //os.proc(
+    //  "touch",
+    //  s"${firrtl_blackbox_filelist}"
+    //).call(stdout = os.Inherit)
 
     // Uniquify module names so there's no conflict between synthesis-runs and simulation-runs
     os.proc(
       "/home/sumana/Desktop/Workspace/redefine-workspace/playground/dependencies/chipyard/scripts/uniquify-module-names.py",
       //s"--model-hier-json ${}",
-      //s"--top-hier-json ${}",
+      s"--top-hier-json ${synth_out_dir}/top_module_hierarchy.json",
       s"--in-all-filelist ${collateral_out_dir}/filelist.f",
       s"--in-bb-filelist ${firrtl_blackbox_filelist}",
       s"--dut AccelRRM",
       //s"--model ",
       s"--target-dir ${collateral_out_dir}",
-      s"--out-dut-filelist ${synth_out_dir}/${annoName}.top.f",
+      s"--out-dut-filelist ${curr_dir}/${synth_out_dir}/${annoName}.top.f",
       //s"--out-model-filelist ",
       //s"--out-model-hier-json ",
       s"--gcpath ${collateral_out_dir}"
-    ) 
+    ).call(stdout = os.Inherit)
   }
 
 }
