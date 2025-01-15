@@ -112,6 +112,16 @@ trait SynthToplevel {
   def anno_file       = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.anno.json"
   def extra_anno_file = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.extrafirtool.anno.json"
   def final_anno_file = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.appended.anno.json"
+  def top_mems_firFile = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.top.mems.fir"
+  def top_mems_vFile   = s"${curr_dir}" + s"/${collateral_out_dir}/${annoName}.top.mems.v"
+  // TODO: Change
+  def sram_cache_json  = "chipyard/.conda-env/lib/python3.10/site-packages/hammer/technology/nangate45/sram-cache.json"
+
+  lazy val macroCompilerArgs = Array("-n", mfc_smems_conf, 
+    "-v", top_mems_vFile, 
+    "-f", top_mems_firFile,
+    "-l", sram_cache_json, 
+    "--mode", "strict")
 
   def create_final_anno_file() : Unit = {
     os.proc(
@@ -125,7 +135,11 @@ trait SynthToplevel {
       s"${mfc_extra_anno_contents}",
     )
 
-    Seq("jq","-s","[.[][]]", s"${anno_file}", s"${extra_anno_file}", ">", s"${final_anno_file}").!
+    // This works:
+    //Seq("jq","-s","[.[][]]", s"${anno_file}", s"${extra_anno_file}", ">", s"${final_anno_file}").!
+    val jq_cmd = Seq("jq","-s","[.[][]]", s"${anno_file}", s"${extra_anno_file}", ">", s"${final_anno_file}")
+    println(s"LOG: command invoked \"${jq_cmd.mkString(" ")}\"")
+    os.proc(jq_cmd).call(stdout = os.Inherit)
 
     //os.proc(
     //  "jq -s '[.[][]]'",
@@ -142,7 +156,7 @@ trait SynthToplevel {
   }
 
   def chipyardAnno(): Unit = {
-    //(new ChipyardStage).execute(annoArgs, Seq.empty)
+    (new ChipyardStage).execute(annoArgs, Seq.empty)
     create_final_anno_file()
   }
   //def chiselAnno(): Unit = try {
@@ -166,7 +180,7 @@ trait SynthToplevel {
   def fir_file = s"${curr_dir}/${synth_out_dir}/${annoName}.fir"
 
   // Call this only after calling chipyardAnno()
-  def synthFirrtl2synthSV() = 
+  def synthFirrtl2synthSV() : Unit = { 
     os.proc(
       "firtool",
       "--format=fir",                      //extra
@@ -186,13 +200,17 @@ trait SynthToplevel {
       s"-o=${collateral_out_dir}",
       s"${fir_file}",
     ).call(stdout = os.Inherit) // check additional options with "firtool --help"
+    
+    // Need trailing space for SFC macrocompiler
+    val sed_cmd = Seq("sed", "-i", "s/.*/& /", s"${mfc_smems_conf}")
+    println(s"LOG: command invoked \"${sed_cmd.mkString(" ")}\"")
+    os.proc(sed_cmd).call(stdout = os.Inherit)
 
+  }
+  
   def firrtl_blackbox_filelist = s"${collateral_out_dir}/firrtl_black_box_resource_files.f"
 
   def uniquifyModuleNames() : Unit = {
-
-    Seq("sed", "-i", "s/.*/& /", "/home/sumana/Desktop/Workspace/redefine-workspace/RRM/generated_sv_dir/vlsi/rrm.syn.AccelRRM.RRMConfig/rrm.syn.AccelRRM.RRMConfig.mems.conf").!
-
     ////  if there are no BB's then the file might not be generated, instead always generate it
     //os.proc(
     //  "touch",
@@ -214,6 +232,10 @@ trait SynthToplevel {
       //s"--out-model-hier-json ",
       s"--gcpath ${collateral_out_dir}"
     ).call(stdout = os.Inherit)
+  }
+
+  def chipyardMacroCompiler() : Unit = {
+    (MacroCompiler).run(macroCompilerArgs)
   }
 
 }
