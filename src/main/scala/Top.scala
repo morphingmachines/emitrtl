@@ -5,6 +5,7 @@ import circt.stage.ChiselStage
 import freechips.rocketchip.util.ElaborationArtefacts
 import org.chipsalliance.diplomacy.lazymodule.LazyModule
 import chipyard.stage._
+import chipyard.tapeout.macros._
 
 import java.io._
 import java.nio.file._
