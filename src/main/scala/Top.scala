@@ -59,8 +59,6 @@ trait Toplevel {
       "firtool",
       s"${out_dir}.fir",
       "--disable-annotation-unknown",
-      // "--strip-debug-info",
-      "--lower-memories",
       "--split-verilog",
       s"-o=${out_dir}",
       s"--output-annotation-file=${out_dir}/${topModule_name}.anno.json",
