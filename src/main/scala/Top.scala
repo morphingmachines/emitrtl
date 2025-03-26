@@ -17,14 +17,6 @@ class TestHarness(dut: => TestHarnessShell) extends Module {
   val io   = IO(new Bundle { val success = Output(Bool()) })
   val inst = Module(dut)
   io.success := inst.io.success
-  /*
-  val count = RegInit(0.U(1.W))
-  inst.io.start := false.B
-  when(count =/= 1.U) {
-    inst.io.start := true.B
-    count         := count + 1.U
-  }
-   */
 }
 
 trait Toplevel {
@@ -55,6 +47,7 @@ trait Toplevel {
       "firtool",
       s"${out_dir}.fir",
       "--disable-annotation-unknown",
+      "--lower-memories",
       "--split-verilog",
       s"-o=${out_dir}",
       s"--output-annotation-file=${out_dir}/${topModule_name}.anno.json",
