@@ -47,6 +47,7 @@ trait Toplevel {
       "firtool",
       s"${out_dir}.fir",
       "--disable-annotation-unknown",
+      "--add-vivado-ram-address-conflict-synthesis-bug-workaround",
       "--lower-memories",
       "--split-verilog",
       s"-o=${out_dir}",
