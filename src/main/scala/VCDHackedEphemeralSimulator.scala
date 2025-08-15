@@ -49,12 +49,38 @@ object VCDHackedEphemeralSimulator extends PeekPokeAPI {
   private def makeSimulator: DefaultSimulator = {
     // TODO: Use ProcessHandle when we can drop Java 8 support
     // val id = ProcessHandle.current().pid().toString()
-    val id        = java.lang.management.ManagementFactory.getRuntimeMXBean().getName()
-    val className = getClass().getName().stripSuffix("$")
+    // val id        = java.lang.management.ManagementFactory.getRuntimeMXBean().getName()
+    // val id        =  CallerUtils.callerClassName
+    val className = CallerUtils.callerClassName
     // HACK: use $PWD/test_run_dir like in old versions of Chisel
     // new DefaultSimulator(Files.createTempDirectory(s"${className}_${id}_").toString)
     new DefaultSimulator(
-      Files.createDirectories(java.nio.file.Paths.get(s"test_run_dir/${className}_${id}_")).toAbsolutePath.toString,
+      Files.createDirectories(java.nio.file.Paths.get(s"test_run_dir/${className}")).toAbsolutePath.toString,
     )
+  }
+}
+
+object CallerUtils {
+  import java.lang.StackWalker
+  import java.lang.StackWalker.Option.RETAIN_CLASS_REFERENCE
+
+  def callerClassName: String = {
+    val walker = StackWalker.getInstance(RETAIN_CLASS_REFERENCE)
+    walker.walk { frames =>
+      val it = frames.iterator()
+
+      // frame(0) = callerClassName (this method)
+      it.next()
+
+      // frame(1) = method inside this object that the caller invoked
+      it.next()
+
+      // frame(2) = the actual caller VCDHackedEphemeralSimulator
+      it.next()
+
+      // frame(3) = the actual caller
+      val cls = it.next().getDeclaringClass
+      if (cls.getName.endsWith("$")) cls.getName.stripSuffix("$") else cls.getName
+    }
   }
 }
