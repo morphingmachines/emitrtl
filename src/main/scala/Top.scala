@@ -2,29 +2,47 @@ package emitrtl
 
 import chisel3._
 import circt.stage.ChiselStage
+import freechips.rocketchip.unittest.UnitTest
 import freechips.rocketchip.util.ElaborationArtefacts
 import org.chipsalliance.diplomacy.lazymodule.LazyModule
 
 import java.io._
 import java.nio.file._
 
-trait TestHarnessShell extends Module {
-  val io = IO(new Bundle { val success = Output(Bool()) })
-}
+package top {
+  trait TestHarnessShell extends Module {
+    val io = IO(new Bundle { val success = Output(Bool()) })
+  }
 
-//dut is passed as call-by-name parameter as Module instantiate should be wrapped in Module()
-class TestHarness(dut: => TestHarnessShell) extends Module {
-  val io   = IO(new Bundle { val success = Output(Bool()) })
-  val inst = Module(dut)
-  io.success := inst.io.success
-  /*
+  // dut is passed as call-by-name parameter as Module instantiate should be wrapped in Module()
+  class TestHarness(dut: => TestHarnessShell) extends Module {
+    val io   = IO(new Bundle { val success = Output(Bool()) })
+    val inst = Module(dut)
+    io.success := inst.io.success
+    /*
   val count = RegInit(0.U(1.W))
   inst.io.start := false.B
   when(count =/= 1.U) {
     inst.io.start := true.B
     count         := count + 1.U
   }
-   */
+     */
+  }
+}
+
+package unit {
+  // For Module level unit testing
+  class TestHarness(dut: => UnitTest) extends Module {
+    val io   = IO(new Bundle { val success = Output(Bool()) })
+    val inst = Module(dut)
+    io.success := inst.io.finished
+    val count = RegInit(0.U(1.W))
+    inst.io.start := false.B
+    when(count =/= 1.U) {
+      inst.io.start := true.B
+      count         := count + 1.U
+    }
+  }
 }
 
 trait Toplevel {
@@ -93,10 +111,6 @@ trait LazyToplevel extends Toplevel {
 }
 
 trait VerilateTestHarness { this: Toplevel =>
-  def dut: TestHarnessShell
-
-  override def topModule      = new TestHarness(dut)
-  override def topModule_name = dut.getClass().getName().split("\\$").mkString(".")
 
   val rocketchip_resource_path = s"${os.pwd.toString()}/../playground/dependencies/rocket-chip/src/main/resources"
 
@@ -134,7 +148,7 @@ trait VerilateTestHarness { this: Toplevel =>
           "-f",
           "filelist.f",
           "--top-module",
-          "TestHarness",
+          s"TestHarness",
           "--trace",
           "--vpi",
           "--exe",
@@ -154,8 +168,14 @@ trait VerilateTestHarness { this: Toplevel =>
 }
 
 trait WithLazyModuleDUT { this: VerilateTestHarness with LazyToplevel =>
-  override def dut            = lazyTop.module.asInstanceOf[TestHarnessShell]
-  override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
+  def dut            = lazyTop.module.asInstanceOf[top.TestHarnessShell]
+  lazy val topModule = new top.TestHarness(dut)
+}
+
+trait WithUnitTestDUT { this: VerilateTestHarness with Toplevel =>
+  val dut: UnitTest
+  lazy val topModule          = new unit.TestHarness(dut)
+  override def topModule_name = dut.getClass().getName().split("\\$").mkString(".")
 }
 
 /** To run from a terminal shell
