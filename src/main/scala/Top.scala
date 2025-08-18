@@ -168,8 +168,8 @@ trait VerilateTestHarness { this: Toplevel =>
 }
 
 trait WithLazyModuleDUT { this: VerilateTestHarness with LazyToplevel =>
-  def dut            = lazyTop.module.asInstanceOf[top.TestHarnessShell]
-  lazy val topModule = new top.TestHarness(dut)
+  def dut                     = lazyTop.module.asInstanceOf[top.TestHarnessShell]
+  override lazy val topModule = new top.TestHarness(dut)
 }
 
 trait WithUnitTestDUT { this: VerilateTestHarness with Toplevel =>
