@@ -12,50 +12,53 @@ import scalafmt._
 import $ivy.`com.goyeau::mill-scalafix::0.3.1`
 import com.goyeau.mill.scalafix.ScalafixModule
 
-import $file.^.playground.build
-import $file.^.playground.dependencies.cde.build
-import $file.^.playground.dependencies.`rocket-chip`.common
+import $file.^.playground.{builddefs => playground_build}
+import $file.^.playground.dependencies.cde.{build => cde_build}
+import $file.^.playground.dependencies.`rocket-chip`.{common => rocketchip_common}
+import $file.^.playground.dependencies.diplomacy.{common => diplomacy_common}
+
 
 object ivys {
-  val cv = ^.playground.build.ivys.cv
+  val cv = playground_build.ivys.cv
 }
 
-object macros extends ^.playground.dependencies.`rocket-chip`.common.MacrosModule with SbtModule {
+object macros extends rocketchip_common.MacrosModule with SbtModule {
   override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "rocket-chip" / "macros"
-  def scalaVersion: T[String] = T(^.playground.build.ivys.sv)
-  def scalaReflectIvy = ^.playground.build.ivys.scalaReflect
+  def scalaVersion: T[String] = T(playground_build.ivys.sv)
+  def scalaReflectIvy = playground_build.ivys.scalaReflect
 }
 
-object mycde extends ^.playground.dependencies.cde.build.CDE with PublishModule {
+object mycde extends cde_build.CDE with PublishModule {
   override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "cde" / "cde"
+  def scalaVersion: T[String] = T(playground_build.ivys.sv)
 }
 
 object mydiplomacy
-  extends ^.playground.dependencies.diplomacy.common.DiplomacyModule
-  with ^.playground.build.CommonModule {
+  extends diplomacy_common.DiplomacyModule
+  with playground_build.CommonModule {
   override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "diplomacy" / "diplomacy"
-  override def scalaVersion   = ^.playground.build.ivys.sv
+  override def scalaVersion   = playground_build.ivys.sv
   def chiselModule            = None
   def chiselPluginJar         = None
-  def chiselIvy               = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._1)
-  def chiselPluginIvy         = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._2)
-  def sourcecodeIvy           = ^.playground.build.ivys.sourcecode
+  def chiselIvy               = Some(playground_build.ivys.chiselCrossVersions(ivys.cv)._1)
+  def chiselPluginIvy         = Some(playground_build.ivys.chiselCrossVersions(ivys.cv)._2)
+  def sourcecodeIvy           = playground_build.ivys.sourcecode
   def cdeModule               = mycde
 }
 
-object myrocketchip extends ^.playground.dependencies.`rocket-chip`.common.RocketChipModule with SbtModule {
+object myrocketchip extends rocketchip_common.RocketChipModule with SbtModule {
 
   override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "rocket-chip"
 
-  override def scalaVersion = ^.playground.build.ivys.sv
+  override def scalaVersion = playground_build.ivys.sv
 
   def chiselModule = None
 
   def chiselPluginJar = None
 
-  def chiselIvy = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._1)
+  def chiselIvy = Some(playground_build.ivys.chiselCrossVersions(ivys.cv)._1)
 
-  def chiselPluginIvy = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._2)
+  def chiselPluginIvy = Some(playground_build.ivys.chiselCrossVersions(ivys.cv)._2)
 
   override def ivyDeps             = T(super.ivyDeps() ++ chiselIvy)
   override def scalacPluginIvyDeps = T(super.scalacPluginIvyDeps() ++ chiselPluginIvy)
@@ -68,36 +71,20 @@ object myrocketchip extends ^.playground.dependencies.`rocket-chip`.common.Rocke
 
   def diplomacyModule: ScalaModule = mydiplomacy
 
-  def mainargsIvy = ^.playground.build.ivys.mainargs
+  def mainargsIvy = playground_build.ivys.mainargs
 
-  def json4sJacksonIvy = ^.playground.build.ivys.json4sJackson
+  def json4sJacksonIvy = playground_build.ivys.json4sJackson
 
-}
-
-object inclusivecache extends ^.playground.build.CommonModule {
-  override def millSourcePath =
-    os.pwd / os.up / "playground" / "dependencies" / "rocket-chip-inclusive-cache" / "design" / "craft" / "inclusivecache"
-  override def moduleDeps = super.moduleDeps ++ Seq(myrocketchip)
-}
-
-object blocks extends ^.playground.build.CommonModule with SbtModule {
-  override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "rocket-chip-blocks"
-  override def moduleDeps     = super.moduleDeps ++ Seq(myrocketchip)
-}
-
-object shells extends ^.playground.build.CommonModule with SbtModule {
-  override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "rocket-chip-fpga-shells"
-  override def moduleDeps     = super.moduleDeps ++ Seq(myrocketchip, blocks)
 }
 
 // UCB
 object myhardfloat extends ScalaModule with SbtModule with PublishModule {
   override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "berkeley-hardfloat"
-  def scalaVersion            = ^.playground.build.ivys.sv
+  def scalaVersion            = playground_build.ivys.sv
 
-  def chiselIvy = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._1)
+  def chiselIvy = Some(playground_build.ivys.chiselCrossVersions(ivys.cv)._1)
 
-  def chiselPluginIvy = Some(^.playground.build.ivys.chiselCrossVersions(ivys.cv)._2)
+  def chiselPluginIvy = Some(playground_build.ivys.chiselCrossVersions(ivys.cv)._2)
 
   override def ivyDeps             = T(super.ivyDeps() ++ chiselIvy)
   override def scalacPluginIvyDeps = T(super.scalacPluginIvyDeps() ++ chiselPluginIvy)
@@ -122,6 +109,24 @@ object myhardfloat extends ScalaModule with SbtModule with PublishModule {
   )
 }
 
+object chipyardAnnotations extends playground_build.CommonModule with SbtModule {
+  override def millSourcePath = os.pwd / os.up/ "playground" / "dependencies" / "chipyard" / "tools" / "stage"
+  override def moduleDeps     = super.moduleDeps ++ Seq(myrocketchip)
+}
+ 
+object chipyardTapeout extends playground_build.CommonModule with SbtModule {
+  override def millSourcePath = os.pwd / os.up/ "playground" / "dependencies" / "chipyard" / "tools" / "tapeout"
+  //override def millSourcePath = os.pwd / "dependencies" / "chipyard" / "tools" / "tapeout"
+  override def scalaVersion = playground_build.ivys.sv1 // stuck on chisel3 2.13.10
+  override def chiselIvy = Some(playground_build.ivys.chiselCrossVersions(playground_build.ivys.cv1)._1) // stuck on chisel3 and SFC
+  override def chiselPluginIvy = Some(playground_build.ivys.chiselCrossVersions(playground_build.ivys.cv1)._1)
+  //def playjsonIvy = ivys.playjson
+  def playjsonIvy = ivy"com.typesafe.play::play-json:2.9.2"
+  override def ivyDeps = T(super.ivyDeps() ++ Some(playjsonIvy))
+  override def moduleDeps = super.moduleDeps
+}
+
+
 trait ScalacOptions extends ScalaModule {
   override def scalacOptions = T {
     super.scalacOptions() ++ Seq(
@@ -138,12 +143,12 @@ trait ScalacOptions extends ScalaModule {
 }
 
 object emitrtl
-  extends ^.playground.build.CommonModule
+  extends playground_build.CommonModule
   with SbtModule
   with ScalafmtModule
   with ScalafixModule
   with ScalacOptions {
   override def millSourcePath = os.pwd
 
-  override def moduleDeps = super.moduleDeps ++ Seq(myrocketchip)
+  override def moduleDeps = super.moduleDeps ++ Seq(myrocketchip, chipyardAnnotations, chipyardTapeout)
 }
