@@ -15,6 +15,7 @@ import com.goyeau.mill.scalafix.ScalafixModule
 import $file.^.playground.{builddefs => playground_build}
 import $file.^.playground.dependencies.cde.{build => cde_build}
 import $file.^.playground.dependencies.`rocket-chip`.{common => rocketchip_common}
+import $file.^.playground.dependencies.`berkeley-hardfloat`.{common => hardfloat_common}
 import $file.^.playground.dependencies.diplomacy.{common => diplomacy_common}
 
 
@@ -78,9 +79,13 @@ object myrocketchip extends rocketchip_common.RocketChipModule with SbtModule {
 }
 
 // UCB
-object myhardfloat extends ScalaModule with SbtModule with PublishModule {
-  override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "berkeley-hardfloat"
+object myhardfloat extends hardfloat_common.HardfloatModule with PublishModule {
+  override def millSourcePath = os.pwd / os.up / "playground" / "dependencies" / "berkeley-hardfloat" /"hardfloat"
   def scalaVersion            = playground_build.ivys.sv
+
+  def chiselModule = None
+
+  def chiselPluginJar = None
 
   def chiselIvy = Some(playground_build.ivys.chiselCrossVersions(ivys.cv)._1)
 

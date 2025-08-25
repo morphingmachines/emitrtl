@@ -1,0 +1,446 @@
+[
+    {
+        "type": "sram",
+        "name": "rf_sp_196x52_wm0",
+        "depth": "196",
+        "width": 52,
+        "family": "1RW",
+        "vt": "RF",
+        "mux": 2,
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "WEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 3,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 2,
+                "name": "EMAW"
+            }
+        ]
+    }, 
+    {
+        "type": "sram",
+        "name": "rf_sp_32x128_wm1",
+        "depth": "32",
+        "width": 128,
+        "family": "1RW",
+        "vt": "RF",
+        "mux": 2,
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "mask granularity": 1,
+                "mask port name": "WEN",
+                "mask port polarity": "active low",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "GWEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 3,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 2,
+                "name": "EMAW"
+            }
+        ]
+    },
+    {
+        "type": "sram",
+        "name": "rf_sp_256x160_wm1",
+        "depth": "256",
+        "width": 160,
+        "family": "1RW",
+        "vt": "RF",
+        "mux": 2,
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "mask granularity": 1,
+                "mask port name": "WEN",
+                "mask port polarity": "active low",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "GWEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 3,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 2,
+                "name": "EMAW"
+            }
+        ]
+    },
+    {
+        "type": "sram",
+        "name": "rf_sp_32x144_wm1",
+        "depth": "32",
+        "width": 144,
+        "family": "1RW",
+        "vt": "RF",
+        "mux": 2,
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "mask granularity": 1,
+                "mask port name": "WEN",
+                "mask port polarity": "active low",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "GWEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 3,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 2,
+                "name": "EMAW"
+            }
+        ]
+    },
+    {
+        "type": "sram",
+        "name": "sram_sp_1568x51",
+        "depth": "1568",
+        "width": 51,
+        "family": "1RW",
+        "vt": "SRAM",
+        "mux": 4,
+        "mask": "false",
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "GWEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 1,
+                "name": "STOV"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "WABL"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 2,
+                "name": "WABLM"
+            },
+            {
+                "type": "constant",
+                "value": 2,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 2,
+                "name": "EMAW"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 1,
+                "name": "EMAS"
+            }
+        ]
+    },
+    {
+        "type": "sram",
+        "name": "sram_sp_512x128",
+        "depth": "512",
+        "width": 128,
+        "family": "1RW",
+        "vt": "SRAM",
+        "mux": 4,
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "GWEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 1,
+                "name": "STOV"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "WABL"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 2,
+                "name": "WABLM"
+            },
+            {
+                "type": "constant",
+                "value": 2,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 2,
+                "name": "EMAW"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 1,
+                "name": "EMAS"
+            }
+        ]
+    },    {
+        "type": "sram",
+        "name": "sram_sp_512x32",
+        "depth": "512",
+        "width": 32,
+        "family": "1RW",
+        "vt": "SRAM",
+        "mux": 4,
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "GWEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 1,
+                "name": "STOV"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "WABL"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 2,
+                "name": "WABLM"
+            },
+            {
+                "type": "constant",
+                "value": 2,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 2,
+                "name": "EMAW"
+            },
+            {
+                "type": "constant",
+                "value": 0,
+                "width": 1,
+                "name": "EMAS"
+            }
+        ]
+    },
+    {
+        "type": "sram",
+        "name": "rf_sp_256x160_wm1",
+        "depth": "256",
+        "width": 160,
+        "family": "1RW",
+        "vt": "RF",
+        "mux": 2,
+        "ports": [
+            {
+                "address port name": "A",
+                "address port polarity": "active high",
+                "chip enable port name": "CEN",
+                "chip enable port polarity": "active low",
+                "clock port name": "CLK",
+                "clock port polarity": "positive edge",
+                "input port name": "D",
+                "input port polarity": "active high",
+                "mask granularity": 1,
+                "mask port name": "WEN",
+                "mask port polarity": "active low",
+                "output port name": "Q",
+                "output port polarity": "active high",
+                "write enable port name": "GWEN",
+                "write enable port polarity": "active low"
+            }
+        ],
+        "extra ports": [
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 1,
+                "name": "RET1N"
+            },
+            {
+                "type": "constant",
+                "value": 3,
+                "width": 3,
+                "name": "EMA"
+            },
+            {
+                "type": "constant",
+                "value": 1,
+                "width": 2,
+                "name": "EMAW"
+            }
+        ]
+    }
+]

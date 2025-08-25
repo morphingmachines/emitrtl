@@ -20,14 +20,6 @@ package top {
     val io   = IO(new Bundle { val success = Output(Bool()) })
     val inst = Module(dut)
     io.success := inst.io.success
-    /*
-  val count = RegInit(0.U(1.W))
-  inst.io.start := false.B
-  when(count =/= 1.U) {
-    inst.io.start := true.B
-    count         := count + 1.U
-  }
-     */
   }
 }
 
@@ -136,12 +128,13 @@ trait SynthToplevel {
   def top_mems_firFile = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.top.mems.fir"
   def top_mems_vFile   = s"${curr_dir}" + s"/${collateral_out_dir}/${annoName}.top.mems.v"
   // TODO: Change
-  def sram_cache_json = "chipyard/.conda-env/lib/python3.10/site-packages/hammer/technology/nangate45/sram-cache.json"
+  def sram_cache_json = s"${curr_dir}/dependencies/emitrtl/rrm_mem_files_addl_ports.json"
 
   lazy val macroCompilerArgs =
     Array("-n", mfc_smems_conf, "-v", top_mems_vFile, "-f", top_mems_firFile, "-l", sram_cache_json, "--mode", "strict")
 
   def create_final_anno_file(): Unit = {
+    println("Check-Point-0")
     os.proc(
       "rm",
       "-rf",
@@ -153,47 +146,15 @@ trait SynthToplevel {
       s"${mfc_extra_anno_contents}",
     )
 
-    // This works:
-    // Seq("jq","-s","[.[][]]", s"${anno_file}", s"${extra_anno_file}", ">", s"${final_anno_file}").!
-    val jq_cmd = Seq("jq", "-s", "[.[][]]", s"${anno_file}", s"${extra_anno_file}", ">", s"${final_anno_file}")
+    val jq_cmd = Seq("jq", "-s", "[.[][]]", s"${anno_file}", s"${extra_anno_file}")
     println(s"LOG: command invoked \"${jq_cmd.mkString(" ")}\"")
-    os.proc(jq_cmd).call(stdout = os.Inherit)
-
-    // os.proc(
-    //  "jq -s '[.[][]]'",
-    //  s"${anno_file}",
-    //  s"${extra_anno_file}",
-    // "\'firrtl\'",
-    // "blah2.json"
-    // "/home/sumana/Desktop/Workspace/redefine-workspace/RRM/generated_sv_dir/vlsi/rrm.syn.AccelRRM.RRMConfig/rrm.syn.AccelRRM.RRMConfig.anno.json"
-    // "/home/sumana/Desktop/Workspace/redefine-workspace/RRM/generated_sv_dir/vlsi/rrm.syn.AccelRRM.RRMConfig/rrm.syn.AccelRRM.RRMConfig.extrafirtoo2.anno.json"
-    // s"${anno_file}"
-    //  ">",
-    //  s"${final_anno_file}"
-    // ).call(stdout = os.Inherit)
+    os.proc(jq_cmd).call(stdout = os.Path(final_anno_file))
   }
 
   def chipyardAnno(): Unit = {
     (new ChipyardStage).execute(annoArgs, Seq.empty)
     create_final_anno_file()
   }
-  // def chiselAnno(): Unit = try {
-  //    (new ChipyardStage).execute(args, Seq.empty)
-  // } catch {
-  //  case a: StageError =>
-  //    System.exit(a.code.number)
-  //  case a: OptionsException =>
-  //    StageUtils.dramaticUsageError(a.message)
-  //    System.exit(1)
-  // }
-
-  // def chisel2synthFirrtl() = {
-  //  val str_synthFirrtl = ChiselStage.emitCHIRRTL(synthTopModule, args = Array("--full-stacktrace"))
-  //  Files.createDirectories(Paths.get("generated_sv_dir/vlsi"))
-  //  val pwSynth = new PrintWriter(new File(s"${synth_out_dir}.fir"))
-  //  pwSynth.write(str_synthFirrtl)
-  //  pwSynth.close()
-  // }
 
   def fir_file = s"${curr_dir}/${synth_out_dir}/${annoName}.fir"
 
@@ -242,7 +203,7 @@ trait SynthToplevel {
       s"--top-hier-json ${synth_out_dir}/top_module_hierarchy.json",
       s"--in-all-filelist ${collateral_out_dir}/filelist.f",
       s"--in-bb-filelist ${firrtl_blackbox_filelist}",
-      s"--dut AccelRRM",
+      s"--dut RRMIP",
       // s"--model ",
       s"--target-dir ${collateral_out_dir}",
       s"--out-dut-filelist ${curr_dir}/${synth_out_dir}/${annoName}.top.f",
@@ -251,8 +212,11 @@ trait SynthToplevel {
       s"--gcpath ${collateral_out_dir}",
     ).call(stdout = os.Inherit)
 
-  def chipyardMacroCompiler(): Unit =
-    tapeout.macros.MacroCompiler.run(macroCompilerArgs.toList)
+  def chipyardMacroCompiler(): Unit = {
+    val cmd =
+      Seq("./../playground/mill", "chipyardTapeout.runMain", "tapeout.macros.MacroCompiler") ++ macroCompilerArgs
+    os.proc(cmd).call(stdout = os.Inherit)
+  }
 
 }
 
