@@ -1,7 +1,7 @@
 package emitrtl
 
 import java.io._
-import java.nio.file.Paths
+import java.nio.file.{Files, Paths}
 
 // Helper functions to print the module parameters
 
@@ -28,7 +28,11 @@ object ConfigPrinter {
     writer.close()
   }
   // move the generated parameters.txt to out_dir (generated_sv_dir/topModule/)
-  def moveParametersFile(out_dir: String): Unit =
-    Paths.get("parameters.txt").toFile().renameTo(Paths.get(out_dir, "parameters.txt").toFile())
+  def moveParametersFile(out_dir: String): Unit = {
+    val path = Paths.get("parameters.txt")
+    if (Files.exists(path)) {
+      path.toFile().renameTo(Paths.get(out_dir, "parameters.txt").toFile())
+    }
+  }
 
 }
