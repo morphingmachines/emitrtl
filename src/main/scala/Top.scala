@@ -42,99 +42,31 @@ trait Toplevel {
   def topModule: chisel3.RawModule
   def topModule_name = topModule.getClass().getName().split("\\$").mkString(".")
 
-  def out_dir = s"generated_sv_dir/${topModule_name}"
+  def configString: String = "None:None" // $(CONFIG_PACKAGE):$(CONFIG)
 
-  /** For firtoolOpts run `firtool --help` There is an overlap between ChiselStage args and firtoolOpts.
-    *
-    * TODO: Passing "--Split-verilog" "--output-annotation-file" to firtool is not working.
-    */
+  val curr_dir: String = os.pwd.toString
+  def rel_out_dir     = s"generated_sv_dir/${topModule_name}.${configString.split(":")(1)}"
+  def out_dir         = s"${curr_dir}/${rel_out_dir}"
+  def firtool_out_dir = s"${out_dir}/chisel_gen_rtl"
+  def outFileName     = topModule_name.split('.').last
 
-  lazy val chiselArgs   = Array("--full-stacktrace", "--target-dir", out_dir, "--split-verilog")
-  lazy val firtroolArgs = Array("-dedup")
+  def fir_file       = s"${out_dir}/${outFileName}.fir"
+  def mfc_smems_conf = s"${out_dir}/${outFileName}.mems.conf"
 
-  def chisel2firrtl() = {
-    val str_firrtl = ChiselStage.emitCHIRRTL(topModule, args = Array("--full-stacktrace"))
-    Files.createDirectories(Paths.get("generated_sv_dir"))
-    val pw = new PrintWriter(new File(s"${out_dir}.fir"))
-    pw.write(str_firrtl)
-    pw.close()
-  }
+  def anno_file       = s"${out_dir}/${outFileName}.anno.json"
+  def final_anno_file = s"${out_dir}/${outFileName}.appended.anno.json"
 
-  // Call this only after calling chisel2firrtl()
-  def firrtl2sv() =
-    os.proc(
-      "firtool",
-      s"${out_dir}.fir",
-      "--disable-annotation-unknown",
-      "--split-verilog",
-      s"-o=${out_dir}",
-      s"--output-annotation-file=${out_dir}/${topModule_name}.anno.json",
-    ).call(stdout = os.Inherit) // check additional options with "firtool --help"
-
-}
-
-trait SynthToplevel {
-  def synthTopModule: chisel3.RawModule
-  def synthTopModule_name = synthTopModule.getClass().getName().split("\\$").mkString(".")
-
-  def synthConfig_name: String // $(CONFIG_PACKAGE):$(CONFIG)
-  def annoName = s"${synthTopModule_name}.${synthConfig_name.split(":")(1)}"
-
-  def curr_dir: String = os.pwd.toString
-  def synth_out_dir      = s"generated_sv_dir/vlsi/${annoName}"
-  def collateral_out_dir = s"${synth_out_dir}/gen-collateral"
-
-  /** For firtoolOpts run `firtool --help` There is an overlap between ChiselStage args and firtoolOpts.
-    *
-    * TODO: Passing "--Split-verilog" "--output-annotation-file" to firtool is not working.
-    */
-
-  lazy val synthChiselArgs   = Array("--full-stacktrace", "--target-dir", synth_out_dir, "--split-verilog")
-  lazy val synthFirtroolArgs = Array("-dedup")
-
-  lazy val annoArgs = Array(
-    "--target-dir",
-    synth_out_dir,
-    "--name",
-    annoName,
-    "--legacy-configs",
-    synthConfig_name,
-    "--top-module",
-    synthTopModule_name,
-  )
-
-  def mfc_top_hrchy_json = s"${curr_dir}" +
-    s"/${synth_out_dir}/top_module_hierarchy.json"
-
-  def mfc_extra_anno_contents =
-    s"""
-    [
-      {
-		    "class": "sifive.enterprise.firrtl.ModuleHierarchyAnnotation",
-		    "filename": "${mfc_top_hrchy_json}"
-	    }
-    ]
-    """
-
-  def mfc_lowering_options = s"emittedLineLength=2048,noAlwaysComb," +
-    s"disallowLocalVariables,verifLabels," +
-    s"disallowPortDeclSharing," +
-    s"locationInfoStyle=wrapInAtSquareBracket"
-
-  def mfc_smems_conf   = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.mems.conf"
-  def anno_file        = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.anno.json"
-  def extra_anno_file  = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.extrafirtool.anno.json"
-  def final_anno_file  = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.appended.anno.json"
-  def top_mems_firFile = s"${curr_dir}" + s"/${synth_out_dir}/${annoName}.top.mems.fir"
-  def top_mems_vFile   = s"${curr_dir}" + s"/${collateral_out_dir}/${annoName}.top.mems.v"
-  // TODO: Change
-  def sram_cache_json = s"${curr_dir}/dependencies/emitrtl/rrm_mem_files_addl_ports.json"
-
-  lazy val macroCompilerArgs =
-    Array("-n", mfc_smems_conf, "-v", top_mems_vFile, "-f", top_mems_firFile, "-l", sram_cache_json, "--mode", "strict")
-
-  def create_final_anno_file(): Unit = {
-    println("Check-Point-0")
+  def addHierarchy2AnnoFile(annIn: String, annOut: String): Unit = {
+    def mfc_extra_anno_contents =
+      s"""
+      [
+        {
+		      "class": "sifive.enterprise.firrtl.ModuleHierarchyAnnotation",
+		      "filename": "${out_dir}/top_module_hierarchy.json"
+	      }
+      ]
+      """
+    def extra_anno_file = s"${out_dir}/${outFileName}.extrafirtool.anno.json"
     os.proc(
       "rm",
       "-rf",
@@ -146,39 +78,97 @@ trait SynthToplevel {
       s"${mfc_extra_anno_contents}",
     )
 
-    val jq_cmd = Seq("jq", "-s", "[.[][]]", s"${anno_file}", s"${extra_anno_file}")
-    println(s"LOG: command invoked \"${jq_cmd.mkString(" ")}\"")
-    os.proc(jq_cmd).call(stdout = os.Path(final_anno_file))
+    val inAnnoFile = new File(annIn)
+    new File(annOut)
+
+    if (inAnnoFile.exists()) {
+      val jq_cmd = Seq("jq", "-s", "[.[][]]", s"${annIn}", s"${extra_anno_file}")
+      println(s"LOG: command invoked \"${jq_cmd.mkString(" ")}\"")
+      os.proc(jq_cmd).call(stdout = os.Path(annOut))
+    } else {
+      os.proc(
+        "mv",
+        s"${extra_anno_file}",
+        s"${annOut}",
+      ).call(stdout = os.Inherit)
+    }
+
+    os.proc(
+      "rm",
+      "-rf",
+      s"${extra_anno_file}",
+    ).call(stdout = os.Inherit)
   }
+
+  def mfc_lowering_options = s"emittedLineLength=2048,noAlwaysComb," +
+    s"disallowLocalVariables,verifLabels," +
+    s"disallowPortDeclSharing," +
+    s"locationInfoStyle=wrapInAtSquareBracket"
+
+  lazy val defaultFirtoolArgs = Seq(
+    "--export-module-hierarchy",
+    "--verify-each=true",
+    "--warn-on-unprocessed-annotations",
+    "--disable-annotation-classless",
+    "--disable-annotation-unknown",
+    s"--lowering-options=${mfc_lowering_options}",
+    s"--annotation-file=${final_anno_file}",
+  )
+
+  lazy val otherFirtoolArgs = Seq(
+    "--strinp-debug-info",
+    "--mlir-timing",
+    s"--output-annotation-file=${out_dir}/${outFileName}.output.anno.json",
+  )
+
+  def chisel2firrtl() = {
+    val str_firrtl = ChiselStage.emitCHIRRTL(topModule, args = Array("--full-stacktrace"))
+    Files.createDirectories(Paths.get(s"${out_dir}"))
+    val pw = new PrintWriter(new File(fir_file))
+    pw.write(str_firrtl)
+    pw.close()
+    addHierarchy2AnnoFile(anno_file, final_anno_file)
+  }
+
+  def firrtl2sv(args: Seq[String] = defaultFirtoolArgs) = {
+    // check additional options with "firtool --help"
+    val cmd = Seq("firtool", "--format=fir") ++ args ++ Seq("--split-verilog", s"-o=${firtool_out_dir}", s"${fir_file}")
+    println(s"Log: ${cmd.mkString(" ")}")
+    os.proc(cmd).call(stdout = os.Inherit)
+  }
+
+}
+
+trait SynthToplevel { this: Toplevel =>
+
+  lazy val annoArgs = Array(
+    "--target-dir",
+    out_dir,
+    "--name",
+    outFileName,
+    "--legacy-configs",
+    configString,
+    "--top-module",
+    topModule_name,
+  )
+
+  def top_mems_firFile = s"/${out_dir}/${outFileName}.top.mems.fir"
+  def top_mems_vFile   = s"/${firtool_out_dir}/${outFileName}.top.mems.v"
+  def hammer_ir_file   = s"/${out_dir}/${outFileName}.mems.hammer.json"
 
   def chipyardAnno(): Unit = {
     (new ChipyardStage).execute(annoArgs, Seq.empty)
-    create_final_anno_file()
+    addHierarchy2AnnoFile(anno_file, final_anno_file)
   }
 
-  def fir_file = s"${curr_dir}/${synth_out_dir}/${annoName}.fir"
-
   // Call this only after calling chipyardAnno()
-  def synthFirrtl2synthSV(): Unit = {
-    os.proc(
-      "firtool",
-      "--format=fir",                      // extra
-      "--export-module-hierarchy",         // extra
-      "--verify-each=true",                // extra
-      "--warn-on-unprocessed-annotations", // extra
-      "--disable-annotation-classless",    // extra
-      "--disable-annotation-unknown",
-      "--mlir-timing",                               // extra
-      s"--lowering-options=${mfc_lowering_options}", // extra
-      // "--strip-debug-info",
-      // "--lower-memories",
-      "--repl-seq-mem",                         // extra
-      s"--repl-seq-mem-file=${mfc_smems_conf}", // extra
-      s"--annotation-file=${final_anno_file}",
-      "--split-verilog",
-      s"-o=${collateral_out_dir}",
-      s"${fir_file}",
-    ).call(stdout = os.Inherit) // check additional options with "firtool --help"
+  def synthFirrtl2synthSV(args: Seq[String] = defaultFirtoolArgs) = {
+
+    lazy val replSeqMemFirtoolArgs = Seq(
+      "--repl-seq-mem",                        // Replace SeqMem instances into external module references.
+      s"--repl-seq-mem-file=${mfc_smems_conf}",// List of external module references input to MacroCompiler
+    )
+    firrtl2sv(args ++ replSeqMemFirtoolArgs)
 
     // Need trailing space for SFC macrocompiler
     val sed_cmd = Seq("sed", "-i", "s/.*/& /", s"${mfc_smems_conf}")
@@ -187,7 +177,7 @@ trait SynthToplevel {
 
   }
 
-  def firrtl_blackbox_filelist = s"${collateral_out_dir}/firrtl_black_box_resource_files.f"
+  def firrtl_blackbox_filelist = s"${firtool_out_dir}/firrtl_black_box_resource_files.f"
 
   def uniquifyModuleNames(): Unit =
     ////  if there are no BB's then the file might not be generated, instead always generate it
@@ -200,35 +190,46 @@ trait SynthToplevel {
     os.proc(
       s"${curr_dir}/../playground/dependencies/chipyard/scripts/uniquify-module-names.py",
       // s"--model-hier-json ${}",
-      s"--top-hier-json ${synth_out_dir}/top_module_hierarchy.json",
-      s"--in-all-filelist ${collateral_out_dir}/filelist.f",
+      s"--top-hier-json ${out_dir}/top_module_hierarchy.json",
+      s"--in-all-filelist ${firtool_out_dir}/filelist.f",
       s"--in-bb-filelist ${firrtl_blackbox_filelist}",
-      s"--dut RRMIP",
+      s"--dut ${outFileName}",
       // s"--model ",
-      s"--target-dir ${collateral_out_dir}",
-      s"--out-dut-filelist ${curr_dir}/${synth_out_dir}/${annoName}.top.f",
+      s"--target-dir ${firtool_out_dir}",
+      s"--out-dut-filelist ${curr_dir}/${out_dir}/${outFileName}.top.f",
       // s"--out-model-filelist ",
       // s"--out-model-hier-json ",
-      s"--gcpath ${collateral_out_dir}",
+      s"--gcpath ${firtool_out_dir}",
     ).call(stdout = os.Inherit)
 
-  def chipyardMacroCompiler(): Unit = {
+  def chipyardMacroCompiler(sram_mdf_json_file: String): Unit = {
+    val sram_cache_json = s"${sram_mdf_json_file}"
+    val macroCompilerArgs =
+      Array(
+        "-n",
+        mfc_smems_conf,
+        "-v",
+        top_mems_vFile,
+        "-f",
+        top_mems_firFile,
+        "-l",
+        sram_cache_json,
+        "-hir",
+        hammer_ir_file,
+      )
+
     val cmd =
       Seq("./../playground/mill", "chipyardTapeout.runMain", "tapeout.macros.MacroCompiler") ++ macroCompilerArgs
+    println(s"LOG: command invoked \"${cmd.mkString(" ")}\"")
     os.proc(cmd).call(stdout = os.Inherit)
   }
 
 }
 
-trait LazyToplevel extends Toplevel with SynthToplevel {
+trait LazyToplevel extends Toplevel {
   def lazyTop: LazyModule
-  override def topModule           = lazyTop.module.asInstanceOf[chisel3.RawModule]
-  override def synthTopModule      = lazyTop.module.asInstanceOf[chisel3.RawModule]
-  override def topModule_name      = lazyTop.getClass().getName().split("\\$").mkString(".")
-  override def synthTopModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
-
-  // default synth Config
-  override def synthConfig_name: String = "None:None" // $(CONFIG_PACKAGE):$(CONFIG)
+  override def topModule      = lazyTop.module.asInstanceOf[chisel3.RawModule]
+  override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
 
   def genDiplomacyGraph() = {
     ElaborationArtefacts.add("graphml", lazyTop.graphML)
@@ -300,14 +301,14 @@ trait VerilateTestHarness { this: Toplevel =>
           s"${emitrtl_path}/src/main/resources/csrc/test_tb_top.cpp",
         )
     println(s"LOG: command invoked \"${cmd.mkString(" ")}\"")
-    os.proc(cmd).call(cwd = os.Path(s"${os.pwd.toString()}/${out_dir}"), stdout = os.Inherit)
+    os.proc(cmd).call(cwd = os.Path(s"${firtool_out_dir}"), stdout = os.Inherit)
   }
 
   def build() = {
     val cmd = Seq("make", "-j", "-C", "obj_dir/", "-f", s"VTestHarness.mk")
     println(s"LOG: command invoked \"${cmd.mkString(" ")}\"")
-    os.proc(cmd).call(cwd = os.Path(s"${os.pwd.toString()}/${out_dir}"), stdout = os.Inherit)
-    println(s"VTestHarness executable in ./generated_sv_dir/${topModule_name}/obj_dir directory.")
+    os.proc(cmd).call(cwd = os.Path(s"${firtool_out_dir}"), stdout = os.Inherit)
+    println(s"VTestHarness executable in ./${rel_out_dir}/chisel_gen_rtl/obj_dir directory.")
     println(s"Run simulation using: ./VTestHarness <foo.elf")
   }
 }
