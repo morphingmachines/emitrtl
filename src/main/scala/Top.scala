@@ -152,9 +152,9 @@ trait SynthToplevel { this: Toplevel =>
     topModule_name,
   )
 
-  def top_mems_firFile = s"/${out_dir}/${outFileName}.top.mems.fir"
-  def top_mems_vFile   = s"/${firtool_out_dir}/${outFileName}.top.mems.v"
-  def hammer_ir_file   = s"/${out_dir}/${outFileName}.mems.hammer.json"
+  def top_mems_firFile = s"${out_dir}/${outFileName}.top.mems.fir"
+  def top_mems_vFile   = s"${firtool_out_dir}/${outFileName}.top.mems.v"
+  def hammer_ir_file   = s"${out_dir}/${outFileName}.mems.hammer.json"
 
   def chipyardAnno(): Unit = {
     (new ChipyardStage).execute(annoArgs, Seq.empty)
