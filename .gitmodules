@@ -1,0 +1,15 @@
+[submodule "dependencies/diplomacy"]
+	path = dependencies/diplomacy
+	url = git@github.com:morphingmachines/diplomacy.git
+[submodule "dependencies/cde"]
+	path = dependencies/cde
+	url = https://github.com/chipsalliance/cde.git
+[submodule "dependencies/berkeley-hardfloat"]
+	path = dependencies/berkeley-hardfloat
+	url = https://github.com/ucb-bar/berkeley-hardfloat.git
+[submodule "dependencies/rocket-chip"]
+	path = dependencies/rocket-chip
+	url = git@github.com:morphingmachines/rocket-chip.git
+[submodule "dependencies/chipyard"]
+	path = dependencies/chipyard
+	url = git@github.com:morphingmachines/chipyard.git
