@@ -115,6 +115,11 @@ trait Toplevel {
     s"--annotation-file=${final_anno_file}",
   )
 
+  lazy val targetFPGAFirtoolArgs = Seq(
+    "--add-vivado-ram-address-conflict-synthesis-bug-workaround",
+    "--lower-memories",
+  )
+
   lazy val otherFirtoolArgs = Seq(
     "--strinp-debug-info",
     "--mlir-timing",
@@ -130,9 +135,11 @@ trait Toplevel {
     addHierarchy2AnnoFile(anno_file, final_anno_file)
   }
 
-  def firrtl2sv(args: Seq[String] = defaultFirtoolArgs) = {
+  def firrtl2sv(args: Seq[String] = defaultFirtoolArgs, fpga: Boolean = false) = {
     // check additional options with "firtool --help"
-    val cmd = Seq("firtool", "--format=fir") ++ args ++ Seq("--split-verilog", s"-o=${firtool_out_dir}", s"${fir_file}")
+    val finalArgs = if (fpga) args ++ targetFPGAFirtoolArgs else args
+    val cmd =
+      Seq("firtool", "--format=fir") ++ finalArgs ++ Seq("--split-verilog", s"-o=${firtool_out_dir}", s"${fir_file}")
     println(s"Log: ${cmd.mkString(" ")}")
     os.proc(cmd).call(stdout = os.Inherit)
   }
