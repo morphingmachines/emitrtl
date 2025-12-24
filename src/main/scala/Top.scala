@@ -287,7 +287,7 @@ trait VerilateTestHarness { this: Toplevel =>
   }
 
   def verilate(
-    emitrtl_path:  String = s"${os.pwd.toString()}/dependencies/emitrtl",
+    emitrtl_path:  String = s"${os.pwd.toString()}/../playground/dependencies/emitrtl",
     extra_CFLAGS:  Seq[String] = Seq(),
     extra_LDFLAGS: Seq[String] = Seq(),
     extras_src:    Seq[String] = Seq(),
