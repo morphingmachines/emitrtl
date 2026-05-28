@@ -1,16 +1,16 @@
 package emitrtl
 
 import java.io._
-import java.nio.file.{Files, Paths}
+import java.nio.file.Paths
+import emitrtl.ParamDescriber
 
 // Helper functions to print the module parameters
 
 object ConfigPrinter {
-  val paramsFileName = "parameters.txt"
 
-  /** Iterates over the Product and appends the parameters to [[paramsFileName]]. BigInts are printed in Hex */
+  // Iterates over the Product and appends the parameters to parameters.txt. BigInts are printed in Hex
   def printParams(header: String, params: Product): Unit = {
-    val writer = new PrintWriter(new FileWriter(paramsFileName, true))
+    val writer = new PrintWriter(new FileWriter("parameters.txt", true))
     writer.append("********" + header + "********\n")
     params.productElementNames.zip(params.productIterator).foreach { case (name, value) =>
       val valueStr = value match {
@@ -23,26 +23,33 @@ object ConfigPrinter {
     writer.close()
   }
 
-  /** overloaded function to append any custom string format to [[paramsFileName]]. */
+  // Generic overload that prints parameter descriptions when an implicit ParamDescriber[T] is available
+  def printParams[T <: Product](header: String, params: T)(implicit d: ParamDescriber[T]): Unit = {
+    val writer = new PrintWriter(new FileWriter("parameters.txt", true))
+    writer.append("********" + header + "********\n")
+    val descs   = d.describe(params)
+    val missing = ParamDescriber.validate(params, descs, allowMissing = true)
+    if (missing.nonEmpty) writer.append(s"# WARNING: missing descriptions for ${missing.mkString(", ")}\n")
+
+    params.productElementNames.zip(params.productIterator).foreach { case (name, value) =>
+      val valueStr = value match {
+        case bigInt: BigInt => "0x" + bigInt.toString(16)
+        case _ => value.toString
+      }
+      val comment = descs.get(name).map("  // " + _).getOrElse("")
+      writer.append(s"$name: $valueStr$comment\n")
+    }
+    writer.append(s"\n")
+    writer.close()
+  }
+  // overloaded function to append any custom string format to parameters.txt
   def printParams(printString: String): Unit = {
-    val writer = new PrintWriter(new FileWriter(paramsFileName, true))
+    val writer = new PrintWriter(new FileWriter("parameters.txt", true))
     writer.append(printString + "\n")
     writer.close()
   }
-
-  /** move the generated [[paramsFileName]] to out_dir (generated_sv_dir/topModule/) */
-  def moveParametersFile(out_dir: String): Unit = {
-    val path = Paths.get(paramsFileName)
-    if (Files.exists(path)) {
-      path.toFile().renameTo(Paths.get(out_dir, paramsFileName).toFile())
-    }
-  }
-
-  def deleteParametersFile: Unit = {
-    val path = Paths.get(paramsFileName)
-    if (Files.exists(path)) {
-      Files.delete(path)
-    }
-  }
+  // move the generated parameters.txt to out_dir (generated_sv_dir/topModule/)
+  def moveParametersFile(out_dir: String): Unit =
+    Paths.get("parameters.txt").toFile().renameTo(Paths.get(out_dir, "parameters.txt").toFile())
 
 }
