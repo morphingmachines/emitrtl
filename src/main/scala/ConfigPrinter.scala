@@ -1,55 +1,69 @@
 package emitrtl
 
 import java.io._
-import java.nio.file.Paths
-import emitrtl.ParamDescriber
+import java.nio.file.{Files, Paths}
+import java.nio.charset.StandardCharsets
+import ParamDescriber
 
-// Helper functions to print the module parameters
+// Prints the parameters and their descriptions in a markdown file
 
 object ConfigPrinter {
+  private val outFile = "parameters.md"
 
-  // Iterates over the Product and appends the parameters to parameters.txt. BigInts are printed in Hex
-  def printParams(header: String, params: Product): Unit = {
-    val writer = new PrintWriter(new FileWriter("parameters.txt", true))
-    writer.append("********" + header + "********\n")
-    params.productElementNames.zip(params.productIterator).foreach { case (name, value) =>
-      val valueStr = value match {
-        case bigInt: BigInt => "0x" + bigInt.toString(16)
-        case _ => value.toString
+  private def mdEscape(s: String): String =
+    Option(s).getOrElse("").replace("|", "&#124;").replace("\r", "").replace("\n", " ").trim
+
+  /** Generic print that optionally uses an implicit ParamDescriber[T].
+    * If no implicit describer is available, descriptions are skipped.
+    */
+  def printParams[T <: Product](header: String, params: T)(implicit describerOpt: Option[ParamDescriber[T]] = None): Unit = {
+    val writer = new PrintWriter(new OutputStreamWriter(new FileOutputStream(outFile, true), StandardCharsets.UTF_8))
+    try {
+      val safeHeader = mdEscape(header)
+      writer.append(s"## $safeHeader\n\n")
+      writer.append("| Parameter | Value | Description |\n")
+      writer.append("|---|---:|---|\n") // parameter left, value right-aligned, description left
+
+      val descs: Map[String, String] = describerOpt.map(_.describe(params)).getOrElse(Map.empty)
+      if (describerOpt.nonEmpty) {
+        val missing = ParamDescriber.validate(params, descs, allowMissing = true)
+        if (missing.nonEmpty) writer.append(s"> **WARNING**: missing descriptions for ${missing.mkString(", ")}\n\n")
       }
-      writer.append(s"$name: $valueStr\n")
+
+      params.productElementNames.zip(params.productIterator).foreach { case (name, value) =>
+        val valueStr = ParamDescriber.formatValue(value)
+        val nameSafe = mdEscape(name)
+        val valueSafe = mdEscape(valueStr)
+        val descSafe = mdEscape(descs.getOrElse(name, ""))
+        writer.append(s"| $nameSafe | $valueSafe | $descSafe |\n")
+      }
+      writer.append("\n")
+    } finally {
+      writer.close()
     }
-    writer.append(s"\n")
-    writer.close()
   }
 
-  // Generic overload that prints parameter descriptions when an implicit ParamDescriber[T] is available
-  def printParams[T <: Product](header: String, params: T)(implicit d: ParamDescriber[T]): Unit = {
-    val writer = new PrintWriter(new FileWriter("parameters.txt", true))
-    writer.append("********" + header + "********\n")
-    val descs   = d.describe(params)
-    val missing = ParamDescriber.validate(params, descs, allowMissing = true)
-    if (missing.nonEmpty) writer.append(s"# WARNING: missing descriptions for ${missing.mkString(", ")}\n")
-
-    params.productElementNames.zip(params.productIterator).foreach { case (name, value) =>
-      val valueStr = value match {
-        case bigInt: BigInt => "0x" + bigInt.toString(16)
-        case _ => value.toString
-      }
-      val comment = descs.get(name).map("  // " + _).getOrElse("")
-      writer.append(s"$name: $valueStr$comment\n")
-    }
-    writer.append(s"\n")
-    writer.close()
-  }
-  // overloaded function to append any custom string format to parameters.txt
+  // Append an arbitrary string to parameters.md (as a paragraph)
   def printParams(printString: String): Unit = {
-    val writer = new PrintWriter(new FileWriter("parameters.txt", true))
-    writer.append(printString + "\n")
-    writer.close()
+    val writer = new PrintWriter(new OutputStreamWriter(new FileOutputStream(outFile, true), StandardCharsets.UTF_8))
+    try {
+      writer.append(printString + "\n\n")
+    } finally {
+      writer.close()
+    }
   }
-  // move the generated parameters.txt to out_dir (generated_sv_dir/topModule/)
-  def moveParametersFile(out_dir: String): Unit =
-    Paths.get("parameters.txt").toFile().renameTo(Paths.get(out_dir, "parameters.txt").toFile())
 
+  // Move the generated parameters.md (preferred) or parameters.txt to out_dir (generated_sv_dir/topModule/)
+  def moveParametersFile(out_dir: String): Unit = {
+    val md = Paths.get(outFile).toFile()
+    val txt = Paths.get("parameters.txt").toFile()
+    if (md.exists()) md.renameTo(Paths.get(out_dir, outFile).toFile())
+    else if (txt.exists()) txt.renameTo(Paths.get(out_dir, "parameters.txt").toFile())
+  }
+
+  // Delete the parameters.md file if it exists
+  def deleteParametersFile: Unit = {
+    val path = Paths.get(outFile)
+    if (Files.exists(path)) Files.delete(path)
+  }
 }

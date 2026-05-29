@@ -3,10 +3,12 @@ package emitrtl
 trait ParamDescriber[T <: Product] {
   def describe(instance: T): Map[String, String]
 }
-
+// Companion object to create a map of parameter names and their descriptions
 object ParamDescriber {
   def fromDescriptionsMap[T <: Product](m: Map[String, String]): ParamDescriber[T] =
     new ParamDescriber[T] { override def describe(instance: T) = m }
+
+  implicit def toOption[T <: Product](implicit d: ParamDescriber[T]): Option[ParamDescriber[T]] = Some(d)
 
   // Returns missing field names; throws if allowMissing==false
   def validate(instance: Product, descriptions: Map[String, String], allowMissing: Boolean = true): Seq[String] = {
