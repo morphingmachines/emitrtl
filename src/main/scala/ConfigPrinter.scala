@@ -3,7 +3,7 @@ package emitrtl
 import java.io._
 import java.nio.file.{Files, Paths}
 import java.nio.charset.StandardCharsets
-import ParamDescriber
+import ParamDescriber._
 
 // Prints the parameters and their descriptions in a markdown file
 
