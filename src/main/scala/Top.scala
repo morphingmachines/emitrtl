@@ -29,11 +29,11 @@ package unit {
     val io   = IO(new Bundle { val success = Output(Bool()) })
     val inst = Module(dut)
     io.success := inst.io.finished
-    val count = RegInit(0.U(1.W))
+    val started = RegInit(false.B)
     inst.io.start := false.B
-    when(count =/= 1.U) {
+    when(!started) {
       inst.io.start := true.B
-      count         := count + 1.U
+      started       := true.B
     }
   }
 }
@@ -45,7 +45,7 @@ trait Toplevel {
   def configString: String = "None:None" // $(CONFIG_PACKAGE):$(CONFIG)
 
   val curr_dir: String = os.pwd.toString
-  def rel_out_dir     = s"generated_sv_dir/${topModule_name}.${configString.split(":")(1)}"
+  def rel_out_dir     = s"generated_sv_dir/${topModule_name}.${configString.split(":").lift(1).getOrElse("None")}"
   def out_dir         = s"${curr_dir}/${rel_out_dir}"
   def firtool_out_dir = s"${out_dir}/chisel_gen_rtl"
   def outFileName     = topModule_name.split('.').last
@@ -79,7 +79,6 @@ trait Toplevel {
     )
 
     val inAnnoFile = new File(annIn)
-    new File(annOut)
 
     if (inAnnoFile.exists()) {
       val jq_cmd = Seq("jq", "-s", "[.[][]]", s"${annIn}", s"${extra_anno_file}")
@@ -121,7 +120,7 @@ trait Toplevel {
   )
 
   lazy val otherFirtoolArgs = Seq(
-    "--strinp-debug-info",
+    "--strip-debug-info",
     "--mlir-timing",
     s"--output-annotation-file=${out_dir}/${outFileName}.output.anno.json",
   )
@@ -171,7 +170,7 @@ trait SynthToplevel { this: Toplevel =>
   // Call this only after calling chipyardAnno()
   def synthFirrtl2synthSV(args: Seq[String] = defaultFirtoolArgs) = {
 
-    lazy val replSeqMemFirtoolArgs = Seq(
+    val replSeqMemFirtoolArgs = Seq(
       "--repl-seq-mem",                        // Replace SeqMem instances into external module references.
       s"--repl-seq-mem-file=${mfc_smems_conf}",// List of external module references input to MacroCompiler
     )
@@ -210,7 +209,6 @@ trait SynthToplevel { this: Toplevel =>
     ).call(stdout = os.Inherit)
 
   def chipyardMacroCompiler(sram_mdf_json_file: String): Unit = {
-    val sram_cache_json = s"${sram_mdf_json_file}"
     val macroCompilerArgs =
       Array(
         "-n",
@@ -220,7 +218,7 @@ trait SynthToplevel { this: Toplevel =>
         "-f",
         top_mems_firFile,
         "-l",
-        sram_cache_json,
+        sram_mdf_json_file,
         "-hir",
         hammer_ir_file,
       )
