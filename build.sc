@@ -156,4 +156,6 @@ object emitrtl
   override def millSourcePath = os.pwd
 
   override def moduleDeps = super.moduleDeps ++ Seq(myrocketchip, chipyardAnnotations, chipyardTapeout)
+
+  override def ivyDeps = T(super.ivyDeps() ++ Agg(builddefs.ivys.scalatest))
 }
