@@ -27,8 +27,6 @@ object ConfigPrinter {
     try {
       val safeHeader = mdEscape(header)
       writer.append(s"## $safeHeader\n\n")
-      writer.append("| Parameter | Value | Description |\n")
-      writer.append("|---|---:|---|\n") // parameter left, value right-aligned, description left
 
       val descs: Map[String, String] = describerOpt.map(_.describe(params)).getOrElse(Map.empty)
 
@@ -44,15 +42,25 @@ object ConfigPrinter {
       if (warnings.nonEmpty)
         writer.append(s"> **WARNING** ($safeHeader): ${warnings.mkString("; ")}\n\n")
 
-      writer.append("| Parameter | Value | Description |\n")
-      writer.append("|---|---:|---|\n") // parameter left, value right-aligned, description left
+      val hasDescs = descs.nonEmpty
+      if (hasDescs) {
+        writer.append("| Parameter | Value | Description |\n")
+        writer.append("|---|---:|---|\n")
+      } else {
+        writer.append("| Parameter | Value |\n")
+        writer.append("|---|---:|\n")
+      }
 
       params.productElementNames.zip(params.productIterator).foreach { case (name, value) =>
         val valueStr  = ParamDescriber.formatValue(value)
         val nameSafe  = mdEscape(name)
         val valueSafe = mdEscape(valueStr)
-        val descSafe  = mdEscape(descs.getOrElse(name, ""))
-        writer.append(s"| $nameSafe | $valueSafe | $descSafe |\n")
+        if (hasDescs) {
+          val descSafe = mdEscape(descs.getOrElse(name, ""))
+          writer.append(s"| $nameSafe | $valueSafe | $descSafe |\n")
+        } else {
+          writer.append(s"| $nameSafe | $valueSafe |\n")
+        }
       }
       writer.append("\n")
     } finally {
