@@ -1,5 +1,10 @@
 package emitrtl
 
+/** Wraps an Int to be formatted as a hex string (e.g. 0x02200000) in the parameters markdown. */
+case class HexInt(value: Int) extends AnyVal {
+  override def toString: String = f"0x${value}%08X"
+}
+
 trait ParamDescriber[T <: Product] {
   def describe(instance: T): Map[String, String]
 }
@@ -19,8 +24,12 @@ object ParamDescriber {
     missing
   }
 
+  private val hexThreshold = 10000
+
   def formatValue(value: Any): String = value match {
-    case bi: BigInt => "0x" + bi.toString(16)
+    case bi: BigInt                             => "0x" + bi.toString(16)
+    case hi: HexInt                             => hi.toString
+    case i:  Int if math.abs(i) >= hexThreshold => s"$i (0x${i.toHexString.toUpperCase})"
     case other => other.toString
   }
 }
