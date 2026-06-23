@@ -61,6 +61,7 @@ object ConfigPrinter {
         } else {
           writer.append(s"| $nameSafe | $valueSafe |\n")
         }
+
       }
       writer.append("\n")
     } finally {
