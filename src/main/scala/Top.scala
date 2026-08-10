@@ -300,7 +300,7 @@ trait VerilateTestHarness { this: Toplevel =>
           "filelist.f",
           "--top-module",
           s"TestHarness",
-          "--trace",
+          "--trace-fst",
           "--vpi",
           "--exe",
           s"${emitrtl_path}/src/main/resources/csrc/test_tb_top.cpp",
