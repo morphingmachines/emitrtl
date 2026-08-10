@@ -19,7 +19,7 @@
 #include <string>
 #include "VTestHarness.h"
 #include "verilated.h"
-#include "verilated_vcd_c.h"
+#include "verilated_fst_c.h"
 
 
 
@@ -38,17 +38,17 @@ int main(int argc, char** argv) {
   VTestHarness* tb = new VTestHarness;
 
   // init trace dump
-  VerilatedVcdC* tfp = NULL;
+  VerilatedFstC* tfp = NULL;
 
-#if VM_TRACE
+#if VM_TRACE_FST
   Verilated::traceEverOn(true);
-  tfp = new VerilatedVcdC;
+  tfp = new VerilatedFstC;
   tb->trace (tfp, 24);
-  tfp->open ("sim.vcd");
+  tfp->open ("sim.fst");
 #endif
   // Simulate
   while(!Verilated::gotFinish()){
-#if VM_TRACE
+#if VM_TRACE_FST
       tfp->dump (main_time);
 #endif
       main_time += 5;
@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
       tb->reset = (main_time < 30);
   }
 
-#if VM_TRACE
+#if VM_TRACE_FST
   tfp->close();
 #endif
 
