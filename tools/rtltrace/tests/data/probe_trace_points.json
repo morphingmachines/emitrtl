@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "points": [
+    {"pid": 1, "kind": "fire", "name": "in", "groups": ["stage"], "on": true, "module": "ProbeTop.a", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:50", "width": 16, "layout": "id:8,delta:6:s,tag:2:e=Mode", "enums": "Mode=0:Idle/1:Run/2:Drain", "meta": "v=1;src=TraceSelfTest.scala:50;dir=in"},
+    {"pid": 2, "kind": "change", "name": "state", "groups": ["stage"], "on": true, "module": "ProbeTop.a", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:51", "width": 2, "layout": "value:2:e=Mode", "enums": "Mode=0:Idle/1:Run/2:Drain", "meta": "v=1;src=TraceSelfTest.scala:51"},
+    {"pid": 3, "kind": "valid", "name": "done", "groups": ["stage.done"], "on": false, "module": "ProbeTop.a", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:52", "width": 8, "layout": "bits:8", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:52;dir=out"},
+    {"pid": 1, "kind": "fire", "name": "in", "groups": ["stage"], "on": true, "module": "ProbeTop.b", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:50", "width": 16, "layout": "id:8,delta:6:s,tag:2:e=Mode", "enums": "Mode=0:Idle/1:Run/2:Drain", "meta": "v=1;src=TraceSelfTest.scala:50;dir=in"},
+    {"pid": 2, "kind": "change", "name": "state", "groups": ["stage"], "on": true, "module": "ProbeTop.b", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:51", "width": 2, "layout": "value:2:e=Mode", "enums": "Mode=0:Idle/1:Run/2:Drain", "meta": "v=1;src=TraceSelfTest.scala:51"},
+    {"pid": 3, "kind": "valid", "name": "done", "groups": ["stage.done"], "on": false, "module": "ProbeTop.b", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:52", "width": 8, "layout": "bits:8", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:52;dir=out"},
+    {"pid": 4, "kind": "change", "name": "slow", "groups": ["slow"], "on": true, "module": "ProbeTop.slow", "class": "emitrtl.trace.SlowCounter", "src": "TraceSelfTest.scala:62", "width": 4, "layout": "value:4", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:62"},
+    {"pid": 5, "kind": "fire", "name": "req", "groups": ["ports"], "on": false, "module": "ProbeTop.pd", "class": "emitrtl.trace.PortsDemo", "src": "TraceSelfTest.scala:76", "width": 8, "layout": "bits:8", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:76;dir=in"},
+    {"pid": 6, "kind": "valid", "name": "resp", "groups": ["ports"], "on": false, "module": "ProbeTop.pd", "class": "emitrtl.trace.PortsDemo", "src": "TraceSelfTest.scala:76", "width": 8, "layout": "bits:8", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:76;dir=out"},
+    {"pid": 7, "kind": "fire", "name": "lanes[0]", "groups": ["ports"], "on": false, "module": "ProbeTop.pd", "class": "emitrtl.trace.PortsDemo", "src": "TraceSelfTest.scala:76", "width": 4, "layout": "bits:4", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:76;dir=out"},
+    {"pid": 8, "kind": "fire", "name": "lanes[1]", "groups": ["ports"], "on": false, "module": "ProbeTop.pd", "class": "emitrtl.trace.PortsDemo", "src": "TraceSelfTest.scala:76", "width": 4, "layout": "bits:4", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:76;dir=out"},
+    {"pid": 9, "kind": "event", "name": "rt", "groups": ["rt"], "on": true, "module": "ProbeTop", "class": "emitrtl.trace.ProbeTop", "src": "TraceSelfTest.scala:128", "width": 27, "layout": "u:8,s:8:s,v[0]:2,v[1]:2,n.x:1:b,n.e:2:e=Mode,n.w:4", "enums": "Mode=0:Idle/1:Run/2:Drain", "meta": "v=1;src=TraceSelfTest.scala:128"},
+    {"pid": 10, "kind": "fire", "name": "stuck", "groups": ["stuck"], "on": true, "module": "ProbeTop", "class": "emitrtl.trace.ProbeTop", "src": "TraceSelfTest.scala:129", "width": 4, "layout": "bits:4", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:129;dir=out"}
+  ]
+}

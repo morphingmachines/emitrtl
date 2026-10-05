@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "points": [
+    {"pid": 1, "kind": "fire", "name": "in", "groups": ["stage"], "on": true, "module": "Stage", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:50", "width": 16, "layout": "id:8,delta:6:s,tag:2:e=Mode", "enums": "Mode=0:Idle/1:Run/2:Drain", "meta": "v=1;src=TraceSelfTest.scala:50;dir=in"},
+    {"pid": 2, "kind": "change", "name": "state", "groups": ["stage"], "on": true, "module": "Stage", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:51", "width": 2, "layout": "value:2:e=Mode", "enums": "Mode=0:Idle/1:Run/2:Drain", "meta": "v=1;src=TraceSelfTest.scala:51"},
+    {"pid": 3, "kind": "valid", "name": "done", "groups": ["stage.done"], "on": false, "module": "Stage", "class": "emitrtl.trace.Stage", "src": "TraceSelfTest.scala:52", "width": 8, "layout": "bits:8", "enums": "-", "meta": "v=1;src=TraceSelfTest.scala:52;dir=out"}
+  ]
+}

@@ -158,4 +158,7 @@ object emitrtl
   override def moduleDeps = super.moduleDeps ++ Seq(myrocketchip, chipyardAnnotations, chipyardTapeout)
 
   override def ivyDeps = T(super.ivyDeps() ++ Agg(builddefs.ivys.scalatest))
+
+  // rtltrace self-test (needs firtool and verilator on PATH): mill emitrtl.test
+  object test extends SbtModuleTests with ScalaTest
 }

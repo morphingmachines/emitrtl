@@ -126,11 +126,13 @@ trait Toplevel {
   )
 
   def chisel2firrtl() = {
+    _root_.emitrtl.trace.Trace.reset()
     val str_firrtl = ChiselStage.emitCHIRRTL(topModule, args = Array("--full-stacktrace"))
     Files.createDirectories(Paths.get(s"${out_dir}"))
     val pw = new PrintWriter(new File(fir_file))
     pw.write(str_firrtl)
     pw.close()
+    _root_.emitrtl.trace.Trace.writeCatalog(s"${out_dir}/trace_points.json")
     addHierarchy2AnnoFile(anno_file, final_anno_file)
   }
 
@@ -141,6 +143,7 @@ trait Toplevel {
       Seq("firtool", "--format=fir") ++ finalArgs ++ Seq("--split-verilog", s"-o=${firtool_out_dir}", s"${fir_file}")
     println(s"Log: ${cmd.mkString(" ")}")
     os.proc(cmd).call(stdout = os.Inherit)
+    _root_.emitrtl.trace.PostPass.run(firtool_out_dir) // rtltrace probes: add %m, time and plusarg enables
   }
 
 }

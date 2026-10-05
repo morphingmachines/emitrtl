@@ -24,10 +24,27 @@ trait VerilatorSimulator extends TestSuite with PeekPokeAPI {
     new svsim.verilator.Backend(wrapper.toFile.getAbsolutePath)
   }
 
+  /** Runs the rtltrace SV post-pass on the elaborated sources right before Verilator compiles them. */
+  private final class TracePostPassBackend(inner: svsim.verilator.Backend, primarySources: => String)
+      extends svsim.Backend {
+    type CompilationSettings = svsim.verilator.Backend.CompilationSettings
+    def generateParameters(
+      outputBinaryName:        String,
+      topModuleName:           String,
+      additionalHeaderPaths:   Seq[String],
+      commonSettings:          svsim.CommonCompilationSettings,
+      backendSpecificSettings: CompilationSettings,
+    ): svsim.Backend.Parameters = {
+      _root_.emitrtl.trace.PostPass.run(primarySources)
+      inner.generateParameters(outputBinaryName, topModuleName, additionalHeaderPaths, commonSettings, backendSpecificSettings)
+    }
+  }
+
   def simulate[T <: RawModule](module: => T)(body: T => Unit): Unit = {
     val workDir = s"build/chiselsim/${getClass.getSimpleName}/$currentTestName"
-    new SingleBackendSimulator[svsim.verilator.Backend] {
-      val backend                   = verilatorWithTiming
+    _root_.emitrtl.trace.Trace.reset()
+    new SingleBackendSimulator[TracePostPassBackend] {
+      val backend = new TracePostPassBackend(verilatorWithTiming, s"${os.pwd}/$workDir/primary-sources")
       val tag                       = "verilator"
       val workspacePath             = workDir
       val commonCompilationSettings = svsim.CommonCompilationSettings()
@@ -38,5 +55,7 @@ trait VerilatorSimulator extends TestSuite with PeekPokeAPI {
       m.controller.setTraceEnabled(true)
       body(m.wrapped)
     }.result
+    // rtltrace catalog next to the workspace: decodes probes whose DECL line never printed (no reset pulse in the test)
+    _root_.emitrtl.trace.Trace.writeCatalog(s"$workDir/trace_points.json")
   }
 }
