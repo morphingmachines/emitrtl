@@ -144,12 +144,17 @@ class Writer:
             t0 = t.start
             t1 = t.end if t.end is not None else self.end
             ln = lane(t.source, t0, t1, t.kind)
-            addr = lab.sym(t.address)
+            addr, addr_long = lab.addr(t.address)
             cov = lab.covers(t.address, t.nbytes)
             name = f"{t.opcode} {addr}" + ("" if t.end is not None else "  (no response)")
-            args = dict(port=pt.name, side=pt.side, client=t.client, source=t.source, address=f"{addr} [0x{t.address:x}]",
+            args = dict(port=pt.name, side=pt.side, client=t.client, source=t.source, address=addr_long,
                         bytes=t.nbytes, request_wait=t.req_wait, latency=t.latency, total=t.total,
                         response=t.resp_opcode, bound_at=pt.at)
+            rg = lab.region(t.address)
+            if rg is not None:
+                args.update(region=rg.name, region_offset=f"0x{rg.offset:x}",
+                            **{("region_id" if k == "region" else k): v for k, v in rg.fields.items()},
+                            **{k: v for k, v in rg.attrs.items() if k in ("scope", "caching", "access")})
             mgr = pt.manager_of(t.address)
             if mgr:
                 args["manager"] = mgr

@@ -23,7 +23,8 @@ class Table:
     note: str = ""
 
 
-def analyze(m: Model, top: int = 10) -> list[Table]:
+def analyze(m: Model, top: int = 10, regions=None) -> list[Table]:
+    """Generic analyses. With `regions` (rtltrace.regions.RegionMap) TileLink tables also name the address region."""
     tr = m.trace
     span_cycles = max(1.0, tr.end_ts - min([min(p.decl_times) / tr.base_period for p in tr.probes.values()
                                              if p.decl_times] + [0.0]))
@@ -128,10 +129,27 @@ def analyze(m: Model, top: int = 10) -> list[Table]:
     out.append(Table("Hangs and long stalls", ["kind", "module", "probe", "from cycle", "cycles"], rows,
                      "pending = still waiting at the end of the trace; stall = waited at least the stall threshold."))
     txns = sorted((t for p in m.ports.values() for t in p.txns if t.total is not None), key=lambda t: -t.total)[:top]
+    rlabel = (lambda a: regions.label(a) or "–") if regions is not None else None  # noqa: E731
     out.append(Table(f"Slowest {top} TileLink transactions", [
-        "module", "port", "opcode", "client", "source", "address", "start cycle", "total", "latency"],
-        [[short(t.port.inst), t.port.name, t.opcode, t.client, t.source, f"0x{t.address:x}", int(t.start), t.total,
-          t.latency] for t in txns]))
+        "module", "port", "opcode", "client", "source", "address"] + (["region"] if rlabel else []) +
+        ["start cycle", "total", "latency"],
+        [[short(t.port.inst), t.port.name, t.opcode, t.client, t.source, f"0x{t.address:x}"] +
+         ([rlabel(t.address)] if rlabel else []) + [int(t.start), t.total, t.latency] for t in txns]))
+    if regions is not None:
+        by = defaultdict(list)
+        for p in m.ports.values():
+            for t in p.txns:
+                if t.kind == "A":
+                    r = regions.lookup(t.address)
+                    by[(short(p.inst), p.name, r.name if r else "–", t.opcode)].append(t)
+        rows = []
+        for (mod, port, rg, op), ts in sorted(by.items(), key=lambda kv: (kv[0][0], kv[0][1], -len(kv[1]))):
+            lat = sorted(t.latency for t in ts if t.latency is not None)
+            q = (lambda f: lat[min(len(lat) - 1, int(f * len(lat)))] if lat else None)  # noqa: E731
+            rows.append([mod, port, rg, op, len(ts), sum(t.nbytes for t in ts), q(0.5), q(0.95)])
+        out.append(Table("TileLink traffic by address region", ["module", "port", "region", "opcode", "transactions",
+                                                                 "bytes", "latency p50", "latency p95"], rows,
+                         f"Regions from {regions.source}."))
     hs = sorted(m.handshakes, key=lambda h: -h.wait)[:top]
     out.append(Table(f"Longest {top} handshake waits", ["module", "probe", "cycle", "wait"],
                      [[short(h.probe.inst), h.probe.name, int(h.t1), h.wait] for h in hs if h.wait]))

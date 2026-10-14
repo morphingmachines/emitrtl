@@ -127,6 +127,8 @@ trait Toplevel {
 
   def chisel2firrtl() = {
     _root_.emitrtl.trace.Trace.reset()
+    // ElaborationArtefacts is JVM-global: keep only this elaboration's (no stale or re-numbered regmap.json)
+    ElaborationArtefacts.files = Nil
     val str_firrtl = ChiselStage.emitCHIRRTL(topModule, args = Array("--full-stacktrace"))
     Files.createDirectories(Paths.get(s"${out_dir}"))
     val pw = new PrintWriter(new File(fir_file))
@@ -239,16 +241,23 @@ trait LazyToplevel extends Toplevel {
   override def topModule      = lazyTop.module.asInstanceOf[chisel3.RawModule]
   override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
 
+  /** Writes every ElaborationArtefact of this elaboration (register maps, graphml, ...) next to the RTL as
+    * `<outFileName>.<extension>`, e.g. DutOrch.0x2200000.0.regmap.json (the names chipyard's GenerateArtefacts used).
+    * Call after chisel2firrtl(): artefacts are added while modules elaborate.
+    */
+  def genElaborationArtefacts(): Unit = {
+    Files.createDirectories(Paths.get(out_dir))
+    ElaborationArtefacts.files.reverse.foreach { case (ext, contents) =>
+      val name = if (ext == "graphml") s"${lazyTop.className}.graphml" else s"${outFileName}.${ext}"
+      val fw   = new FileWriter(new File(s"${out_dir}", name))
+      fw.write(contents())
+      fw.close()
+    }
+  }
+
   def genDiplomacyGraph() = {
     ElaborationArtefacts.add("graphml", lazyTop.graphML)
-    Files.createDirectories(Paths.get(out_dir))
-    ElaborationArtefacts.files.foreach {
-      case ("graphml", graphML) =>
-        val fw = new FileWriter(new File(s"${out_dir}", s"${lazyTop.className}.graphml"))
-        fw.write(graphML())
-        fw.close()
-      case _ =>
-    }
+    genElaborationArtefacts()
   }
 
   def showModuleComposition(gen: => LazyModule) = {

@@ -45,6 +45,7 @@ class Context:
     elf: Any  # rtltrace.elf.Elf or None
     args: dict[str, str]
     trace: Any  # rtltrace.reader.Trace
+    regions: Any = None  # rtltrace.regions.RegionMap or None (--regions / kernel_sections.json)
 
 
 class Plugin:

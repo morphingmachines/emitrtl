@@ -11,13 +11,16 @@ import emitrtl.trace.Trace
 
 // inside a LazyModuleImp: every TileLink link of a node this module owns
 Trace.tl("llc", outer.node, groups = "llc", on = true)
+// a TileLink bundle you already hold (e.g. a tap node's in(0)), in any module
+val (bundle, edge) = outer.tap.in(0)
+Trace.tl("llc_in", bundle, edge, "llc", true)
 
 // custom interfaces, in LazyModuleImp or plain Module
 Trace.fire("req", q.io.enq, groups = "dma")                  // ready/valid: transfers + stalls
 Trace.valid("resp", respValid, "dma")                        // Valid[T]: every cycle valid is high
 Trace.pulse("flush", flushPulse, groups = "dma")             // Bool pulse
 Trace.change("state", fsmReg, groups = "dma", on = true)     // value changes (ChiselEnum names decoded offline)
-Trace.event("hit", cond, Seq("addr" -> a, "way" -> w), groups = "dma")
+Trace.event("hit", cond, Seq("addr" -> a, "way" -> w), groups = "dma", tags = Map("addr" -> "addr"))
 Trace.ports(io, groups = "dma.ports")                        // every ReadyValid / Valid in an IO tree
 ```
 
@@ -31,6 +34,11 @@ Trace.ports(io, groups = "dma.ports")                        // every ReadyValid
   `key=<k>` links events of different probes that carry the same value (e.g. a frame id through a pipeline).
 - The in/out direction used for the bottleneck ranking is automatic for the module's own ports only. For a child's
   port (e.g. the `enq` of a Queue inside the module) state it: `meta = Seq("dir" -> "out")`.
+- `Trace.tl(name, node, ...)` picks the side automatically (`side = "auto"`: a client node's out links, a manager
+  node's in links, an identity node's in links, both sides of an adapter/nexus as `name.in0`, `name.out0`, ...).
+  `data = true` also records `mask`/`data` (wide; off by default).
+- Probe and port names are sanitized: anything other than letters, digits and `_.[]` becomes `_`, so
+  `Trace.tl("CR-DMA-mbus", ...)` appears as `CR_DMA_mbus`. Plugin port globs should use `?` (`CR?DMA?mbus`).
 - `RTLTRACE=off` in the environment at elaboration removes every probe (RTL identical to having none).
 
 emitrtl `Toplevel` writes `trace_points.json` next to the RTL and runs the post-pass that adds `%m`, the simulation
@@ -58,11 +66,15 @@ python3 -m rtltrace perfetto sim.stderr -o trace.json --elf prog.elf --tl-hops  
 python3 -m rtltrace report   sim.stderr -o report.html [--csv tables/]
 python3 -m rtltrace text     sim.stderr --groups llc
 python3 -m rtltrace points   generated_sv_dir/<top>/trace_points.json --grep llc
+python3 -m rtltrace args     --on llc_cache,l1d_cache --off ce      # plusargs for groups
+python3 -m rtltrace elf      prog.elf --lookup 0x40000024           # ELF symbols / address lookup
 ```
 
 Common options: `--elf` (symbolize addresses), `--catalog trace_points.json` (decode probes whose DECL line never
-printed, e.g. a ChiselSim test without a reset pulse), `--only <instance substring>`, `--from/--to <cycle>`,
-`--period <time units per cycle>`, `--stall <cycles>`, `--links rtltrace_links.json`, `--plugin file.py`.
+printed, e.g. a ChiselSim test without a reset pulse), `--regions` (address regions, below), `--only <instance
+substring>`, `--from/--to <cycle>`, `--period <time units per cycle>`, `--stall <cycles>`, `--links
+rtltrace_links.json`, `--tl-hops [--line <bytes>]`, `--plugin file.py[:Class]` and `--plugin-arg key=value`
+(both repeatable). `report` also takes `--csv <dir>` and `--top <n>` (rows in the slowest/longest tables).
 The clock period is inferred from the event timestamps; pass `--period` when a trace is very short (a handful of
 events cannot reveal it).
 
@@ -72,19 +84,55 @@ What you get:
   addresses; markers for long stalls and handshakes still pending at the end; flows for correlation links.
 - **Report**: input-side vs output-side stall per module (bottleneck ranking), per-interface throughput and stalls,
   TileLink latency percentiles and bandwidth per port/opcode/client, source-ID usage, time in each FSM state, hangs,
-  slowest transactions.
+  slowest transactions, traffic by address region; then every plugin's sections. `--csv` writes each table, generic
+  and plugin, as `<title>.csv`.
 - **Relationships**: TileLink request/response pairing is exact (protocol). `--tl-hops` links the same cache line
   across ports (heuristic: the downstream transaction is nested in the upstream one). `--links` declares others:
   `[{"name": "enq2deq", "from": {"probe": "*enq", "key": "id"}, "to": {"probe": "*deq", "key": "id"}, "pairing": "fifo"}]`.
 
+### Address regions
+
+`--regions <file.json>` labels addresses with the named region they fall in:
+- every `#addr` field (TileLink addresses, `Trace.event` fields tagged `addr`) is shown as `StackMemory[ce2]+0x1f0`
+  in Perfetto names, the text log and the report (with `--elf`, a symbol wins when the address has one);
+- TileLink slices get the args `region`, `region_offset`, the decoded fields (a field named `region` becomes
+  `region_id`), `kernel_id` / `cr_id` for extended addresses, and `scope`, `caching`, `access`;
+- the report gets a region column in the slowest-transactions table and a "TileLink traffic by address region" table
+  (port × region × opcode: transactions, bytes, latency p50/p95);
+- plugins get the map as `ctx.regions` (`ctx.regions.lookup(addr)` → `Region(name, offset, fields, attrs)`).
+
+By default (`--regions auto`) a `kernel_sections.json` in the directory of `--catalog` or of a trace file is used;
+`--regions none` disables it. The format (see `rtltrace/regions.py`):
+
+```json
+{"addr_width": 32, "kernel_id_width": 0, "cr_id_width": 0,
+ "sections": [{"name": "StackMemory", "value": "0x38000000", "care": "0xfc000000", "offset_mask": "0xffffff",
+               "fields": [{"name": "ce", "hi": 26, "lo": 24, "add": 0}], "scope": "PRIVATE"}]}
+```
+A section matches when `(addr & care) == value`; the first match in file order wins. `fields` are bit-slices decoded
+per address; bits above `addr_width` are reported as `kernel_id` / `cr_id`. Other keys are passed through as
+attributes. REDEFINE writes this file per RTL config from `KernelSectionConst` (next to `trace_points.json`, by
+`redefine.header.kernelSections.KernelSectionsJson`); the REDEFINE plugins directory keeps a copy for RTL built before
+that.
+
 ## 4. Plugins (system knowledge)
 
-See `rtltrace/plugin.py` for the contract and `examples/llc_miss.py` for a complete example:
+A plugin is a `rtltrace.plugin.Plugin` subclass: `setup(ctx)` (ELF, `--plugin-arg`s, trace, regions),
+`annotate(field, value, event)` (custom labels), `derive(model, out)` (add Perfetto processes, tracks, spans,
+counters, instants and flows through `out`) and `report(model)` (return `Section`s for the HTML/CSV report). A plugin
+that raises is disabled with a warning; the rest of the output continues. See `rtltrace/plugin.py` for the contract
+and `examples/llc_miss.py` for a complete example:
 
 ```sh
 python3 -m rtltrace report sim.stderr -o r.html --plugin examples/llc_miss.py \
     --plugin-arg in='*llc.in0' --plugin-arg out='*llc.out0'
 ```
+
+The REDEFINE plugins (γe/ρ/φ metrics, CE phases from PC markers, CR-DMA utilisation, cache hit/miss, and the
+one-command `redefine_report.py`) live in [`../rtltrace-plugins`](../rtltrace-plugins/README.md).
+
+From Python, `rtltrace.open_trace(traces, elf=, catalog=, regions="auto", plugins=[...], plugin_args={...})` runs the
+same pipeline and returns a `Session` (`model`, `labeler`, `plugins`, `emitted`, `regions`, `warnings`).
 
 ## Trace format v1
 

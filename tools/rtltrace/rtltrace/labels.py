@@ -1,4 +1,5 @@
-"""Field labels shared by every view: enum names, ELF symbols for #addr/#code fields, plugin annotations."""
+"""Field labels shared by every view: enum names, ELF symbols and address regions for #addr/#code fields, plugin
+annotations."""
 
 from __future__ import annotations
 
@@ -7,10 +8,22 @@ from .reader import Event, Field, Probe
 
 
 class Labeler:
-    def __init__(self, elf=None, plugins: Plugins | None = None, emitted: Emit | None = None):
+    def __init__(self, elf=None, plugins: Plugins | None = None, emitted: Emit | None = None, regions=None):
         self.elf = elf
         self.plugins = plugins
         self.emitted = emitted
+        self.regions = regions  # rtltrace.regions.RegionMap or None
+
+    def region(self, addr: int):
+        return self.regions.lookup(addr) if self.regions is not None else None
+
+    def addr(self, addr: int) -> tuple[str, str]:
+        """(short, long) label of an address: ELF symbol, else region (StackMemory[ce2]+0x1f0), else hex."""
+        s = self.sym(addr)
+        r = self.region(addr)
+        short = s if not s.startswith("0x") or r is None else r.label()
+        parts = [x for x in (None if s.startswith("0x") else s, r.label() if r else None) if x]
+        return short, (" · ".join(parts) + f" [0x{addr:x}]") if parts else f"0x{addr:x}"
 
     def sym(self, addr: int) -> str:
         if self.elf is not None:
@@ -37,8 +50,7 @@ class Labeler:
             n = p.enums.get(f.enum or "", {}).get(value)
             return (n, f"{n} ({value})") if n else (str(value), f"{value} (not in {f.enum})")
         if "addr" in tags or "code" in tags:
-            s = self.sym(value)
-            return s, (f"{s} [0x{value:x}]" if not s.startswith("0x") else s)
+            return self.addr(value)
         if f.type in ("d", "s"):
             return str(value), str(value)
         if f.type == "b":

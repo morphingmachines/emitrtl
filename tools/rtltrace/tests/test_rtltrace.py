@@ -27,6 +27,7 @@ from rtltrace.elf import Elf  # noqa: E402
 from rtltrace.perfetto import Writer  # noqa: E402
 from rtltrace.plugin import Plugin  # noqa: E402
 from rtltrace.reader import parse_clients, parse_meta, unescape  # noqa: E402
+from rtltrace.regions import RegionMap  # noqa: E402
 from rtltrace.report import write_csv, write_html  # noqa: E402
 from rtltrace.text import render  # noqa: E402
 
@@ -208,6 +209,39 @@ class ChiselSimTrace(unittest.TestCase):
     def test_without_catalog_warns(self):
         s = open_trace([CSIM])
         self.assertTrue(any("no DECL" in w for w in s.warnings))
+
+
+class Regions(unittest.TestCase):
+    DOC = {"addr_width": 13, "kernel_id_width": 2, "cr_id_width": 1, "sections": [
+        {"name": "Low", "value": "0x0", "care": "0x1000", "offset_mask": "0xfff",
+         "fields": [{"name": "word", "hi": 4, "lo": 2, "add": 0}], "scope": "LOCAL"},
+        {"name": "High", "value": "0x1000", "care": "0x1000", "offset_mask": "0xfff",
+         "fields": [{"name": "region", "hi": 11, "lo": 8, "add": 32}], "caching": "CACHED"}]}
+
+    def test_lookup_and_fields(self):
+        r = RegionMap(self.DOC)
+        x = r.lookup(0x14)
+        self.assertEqual((x.name, x.offset, x.fields, x.attrs), ("Low", 0x14, {"word": 5}, {"scope": "LOCAL"}))
+        self.assertEqual(r.label(0x1340), "High[r35]+0x340")
+        ext = r.lookup((1 << 15 | 3 << 13) | 0x1340)  # cr 1, kernel 3 above the 13-bit logical address
+        self.assertEqual(ext.fields, {"region": 35, "kernel_id": 3, "cr_id": 1})
+        self.assertIsNone(RegionMap({"sections": [{"name": "A", "value": "0x10", "care": "0x10"}]}).lookup(0))
+
+    def test_trace_views(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "kernel_sections.json"
+            f.write_text(json.dumps(self.DOC))
+            s = open_trace([TL], regions=str(f))
+            self.assertEqual(s.labeler.addr(0x14), ("Low[word5]+0x14", "Low[word5]+0x14 [0x14]"))
+            doc = Writer(s.model, s.labeler, s.emitted).build()
+            tl = [e for e in doc["traceEvents"] if e["ph"] == "X" and e.get("args", {}).get("port") == "tapIn"]
+            self.assertTrue(tl and all(e["args"]["region"] in ("Low", "High") for e in tl))
+            self.assertTrue(any(e["name"].split()[-1].startswith(("Low", "High")) for e in tl))
+            tabs = {t.title: t for t in analyze(s.model, 10, s.regions)}
+            rows = [r for r in tabs["TileLink traffic by address region"].rows if r[1] == "tapIn"]
+            self.assertEqual(sum(r[4] for r in rows), 200)
+            self.assertIn("region", tabs["Slowest 10 TileLink transactions"].columns)
+            self.assertIsNone(open_trace([TL], regions="auto").regions)  # nothing next to the fixture
 
 
 class Pieces(unittest.TestCase):

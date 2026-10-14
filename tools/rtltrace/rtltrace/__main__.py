@@ -21,6 +21,9 @@ def _common(p: argparse.ArgumentParser):
     p.add_argument("trace", nargs="+", help="trace file(s): captured simulation stderr")
     p.add_argument("--elf", help="program ELF for address symbolization")
     p.add_argument("--catalog", help="trace_points.json (decodes probes whose DECL line never printed)")
+    p.add_argument("--regions", default="auto",
+                   help="address-regions JSON (kernel_sections.json); default: found next to --catalog or the "
+                        "trace; 'none' to disable")
     p.add_argument("--period", type=int, help="simulation time units per clock cycle (default: inferred)")
     p.add_argument("--stall", type=int, default=64, help="stall-alarm threshold in cycles (default 64)")
     p.add_argument("--only", help="keep only module instances whose path contains this text")
@@ -38,16 +41,17 @@ def _session(a):
     args = dict(kv.split("=", 1) for kv in a.plugin_arg)
     return open_trace(a.trace, elf=a.elf, catalog=a.catalog, period=a.period, stall=a.stall, only=a.only,
                       t_from=a.t_from, t_to=a.t_to, plugins=a.plugin, plugin_args=args, links=a.links,
-                      tl_hops=a.tl_hops, line=a.line, warn=lambda s: print(s, file=sys.stderr))
+                      tl_hops=a.tl_hops, line=a.line, warn=lambda s: print(s, file=sys.stderr),
+                      regions=None if a.regions == "none" else a.regions)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="rtltrace", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     _common(sub.add_parser("perfetto", help="Perfetto timeline JSON (open in ui.perfetto.dev)"))
-    r = sub.add_parser("report", help="HTML report (+ optional CSV) of the generic analyses")
+    r = sub.add_parser("report", help="HTML report (+ optional CSV) of the generic analyses and plugin sections")
     _common(r)
-    r.add_argument("--csv", help="also write each table as CSV into this directory")
+    r.add_argument("--csv", help="also write each table (generic and plugin) as CSV into this directory")
     r.add_argument("--top", type=int, default=10)
     t = sub.add_parser("text", help="decoded chronological log")
     _common(t)
@@ -111,19 +115,21 @@ def main(argv=None) -> int:
               f"{sum(len(p.txns) for p in m.ports.values())} TileLink transactions, {len(m.links)} links, "
               f"{len(m.markers)} markers")
     elif a.cmd == "report":
-        from .analyze import analyze
+        from .analyze import Table, analyze
         from .report import write_csv, write_html, write_text
-        tables = analyze(m, a.top)
+        tables = analyze(m, a.top, s.regions)
         sections = s.plugins.report(m)
         summary = {"traces": ", ".join(a.trace), "probes": len(m.trace.probes),
                    "cycles": int(m.trace.end_ts), "clock period": f"{m.trace.base_period} time units"}
+        if s.regions is not None:
+            summary["address regions"] = s.regions.source
         if a.out:
             write_html(a.out, tables, sections, summary, s.warnings)
             print(f"wrote {a.out}")
         else:
             write_text(sys.stdout, tables, sections)
         if a.csv:
-            write_csv(a.csv, tables)
+            write_csv(a.csv, tables + [Table(x.title, x.columns, x.rows, x.text) for x in sections if x.columns])
     return 0
 
 
