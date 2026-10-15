@@ -1,7 +1,7 @@
 """rtltrace command line.
 
-    python3 -m rtltrace perfetto sim.stderr -o trace.json [--elf prog.elf] [--tl-hops] [--plugin p.py]
-    python3 -m rtltrace report   sim.stderr -o report.html [--csv dir]
+    python3 -m rtltrace perfetto sim.stderr -o trace.json [--elf prog.elf] [--tl-hops] [--plugin p.py] [--view kernel]
+    python3 -m rtltrace report   sim.stderr -o report.html [--csv dir] [--md report.md] [--title "..."]
     python3 -m rtltrace text     sim.stderr [--groups llc,ce]
     python3 -m rtltrace points   trace_points.json [--grep llc]
     python3 -m rtltrace args     --on llc,ce --off crdma
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from . import open_trace
@@ -38,6 +39,9 @@ def _common(p: argparse.ArgumentParser):
 
 
 def _session(a):
+    bad = [kv for kv in a.plugin_arg if "=" not in kv]
+    if bad:
+        raise SystemExit(f"rtltrace: --plugin-arg expects key=value, got {bad[0]!r}")
     args = dict(kv.split("=", 1) for kv in a.plugin_arg)
     return open_trace(a.trace, elf=a.elf, catalog=a.catalog, period=a.period, stall=a.stall, only=a.only,
                       t_from=a.t_from, t_to=a.t_to, plugins=a.plugin, plugin_args=args, links=a.links,
@@ -48,10 +52,15 @@ def _session(a):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="rtltrace", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    _common(sub.add_parser("perfetto", help="Perfetto timeline JSON (open in ui.perfetto.dev)"))
+    pf = sub.add_parser("perfetto", help="Perfetto timeline JSON (open in ui.perfetto.dev)")
+    _common(pf)
+    pf.add_argument("--view", choices=["full", "kernel"], default="full",
+                    help="full: every probe (default); kernel: plugin tracks plus the probes plugins keep")
     r = sub.add_parser("report", help="HTML report (+ optional CSV) of the generic analyses and plugin sections")
     _common(r)
     r.add_argument("--csv", help="also write each table (generic and plugin) as CSV into this directory")
+    r.add_argument("--md", help="also write the report body (no hardware-detail appendix) as Markdown")
+    r.add_argument("--title", default="rtltrace report", help="report title")
     r.add_argument("--top", type=int, default=10)
     t = sub.add_parser("text", help="decoded chronological log")
     _common(t)
@@ -109,27 +118,35 @@ def main(argv=None) -> int:
     elif a.cmd == "perfetto":
         from .perfetto import export
         path = a.out or "rtltrace.json"
-        doc = export(m, s.labeler, path, s.emitted)
+        doc = export(m, s.labeler, path, s.emitted, a.view, s.plugins.keep())
         n = sum(1 for e in doc["traceEvents"] if e["ph"] == "X")
-        print(f"wrote {path}: {len(m.trace.probes)} probes, {n} slices, "
+        print(f"wrote {path} ({a.view} view): {len(m.trace.probes)} probes, {n} slices, "
               f"{sum(len(p.txns) for p in m.ports.values())} TileLink transactions, {len(m.links)} links, "
               f"{len(m.markers)} markers")
     elif a.cmd == "report":
         from .analyze import Table, analyze
-        from .report import write_csv, write_html, write_text
-        tables = analyze(m, a.top, s.regions)
+        from .report import write_csv, write_html, write_md, write_text
+        tables = analyze(m, a.top, s.regions, s.labeler)
         sections = s.plugins.report(m)
-        summary = {"traces": ", ".join(a.trace), "probes": len(m.trace.probes),
-                   "cycles": int(m.trace.end_ts), "clock period": f"{m.trace.base_period} time units"}
+        summary = dict(s.plugins.card())
+        summary["trace"] = (f"{', '.join(os.path.basename(t) for t in a.trace)} · {len(m.trace.probes)} probes · "
+                            f"{int(m.trace.end_ts):,} cycles")
+        details = {"trace file": ", ".join(os.path.abspath(t) for t in a.trace),
+                   "time base": f"1 cycle = {m.trace.base_period:,} simulation time units (the fastest traced clock)"}
         if s.regions is not None:
-            summary["address regions"] = s.regions.source
+            details["address regions"] = s.regions.source
         if a.out:
-            write_html(a.out, tables, sections, summary, s.warnings)
+            write_html(a.out, tables, sections, summary, s.warnings, a.title, details=details)
             print(f"wrote {a.out}")
         else:
             write_text(sys.stdout, tables, sections)
+        if a.md:
+            write_md(a.md, tables, sections, summary, s.warnings, a.title,
+                     html_name=os.path.basename(a.out) if a.out else "")
+            print(f"wrote {a.md}")
         if a.csv:
-            write_csv(a.csv, tables + [Table(x.title, x.columns, x.rows, x.text) for x in sections if x.columns])
+            write_csv(a.csv, tables + [Table(x.title, x.columns, x.rows, x.text, x.key) for x in sections
+                                       if x.columns])
     return 0
 
 

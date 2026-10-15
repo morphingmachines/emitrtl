@@ -22,13 +22,13 @@ sys.path.insert(0, str(HERE.parent))
 
 from rtltrace import open_trace  # noqa: E402
 from rtltrace.__main__ import main  # noqa: E402
-from rtltrace.analyze import analyze  # noqa: E402
+from rtltrace.analyze import Table, analyze  # noqa: E402
 from rtltrace.elf import Elf  # noqa: E402
 from rtltrace.perfetto import Writer  # noqa: E402
-from rtltrace.plugin import Plugin  # noqa: E402
+from rtltrace.plugin import HW_GROUP, Plugin, RtlName, Section  # noqa: E402
 from rtltrace.reader import parse_clients, parse_meta, unescape  # noqa: E402
 from rtltrace.regions import RegionMap  # noqa: E402
-from rtltrace.report import write_csv, write_html  # noqa: E402
+from rtltrace.report import layout, write_csv, write_html, write_md  # noqa: E402
 from rtltrace.text import render  # noqa: E402
 
 DATA = HERE / "data"
@@ -119,6 +119,17 @@ class ProbeTrace(unittest.TestCase):
             links = [(l.src.vals["id"], l.dst.vals["id"]) for l in s.model.links if l.kind == "key:frame"]
             self.assertEqual(sorted(links), [(0x40, 0x40), (0x41, 0x41)])
 
+    def test_rtl_args_keep_fields(self):
+        # a probe field named like an RTL arg (dma_start has `src`) must not be overwritten by the Chisel location
+        trace = "@RT 15 DECL top.a 1 pulse Go g 8 src:8 - v=1;src=X.scala:7\n@RT 100 EVENT top.a 1 42\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "src.stderr"
+            f.write_text(trace)
+            s = open_trace([f], period=10)
+            doc = Writer(s.model, s.labeler, s.emitted).build()
+            args = next(e["args"] for e in doc["traceEvents"] if e.get("ph") == "X")
+            self.assertEqual((args["src"], args["chisel_src"], args["probe"]), ("0x42", "X.scala:7", "Go"))
+
     def test_views(self):
         doc = Writer(self.m, self.s.labeler, self.s.emitted).build()
         self.assertEqual(nesting_errors(doc), 0)
@@ -134,6 +145,61 @@ class ProbeTrace(unittest.TestCase):
             write_csv(f"{tmp}/csv", tables)
             self.assertIn("Interfaces (ready/valid)", Path(f"{tmp}/r.html").read_text())
             self.assertTrue(list(Path(f"{tmp}/csv").glob("*.csv")))
+
+
+class Named(Plugin):
+    """A plugin that names modules and orders the report (chapters, legend)."""
+    name = "named"
+    perfetto_keep = ["state"]
+
+    def display(self, kind, name):
+        return "Stage A" if kind == "module" and name.endswith("dut.a") else None
+
+    def report(self, model):
+        return [Section("Headline", ["module", "x"], [[RtlName("Stage zero", "top.s0"), 1]], "note",
+                        legend={"x": "an x"}, group="1 · Summary", order=10, key="headline")]
+
+
+class ReportLayout(unittest.TestCase):
+    def test_empty_text_and_trace_details(self):
+        secs = [Section("Findings", ["finding"], [], group="1 · Summary", order=1, empty="Nothing to report.")]
+        with tempfile.TemporaryDirectory() as tmp:
+            write_html(f"{tmp}/r.html", [], secs, {"trace": "a.log"}, [], "T", details={"trace file": "/x/a.log"})
+            write_md(f"{tmp}/r.md", [], secs, {"trace": "a.log"}, [], "T")
+            h, md = Path(f"{tmp}/r.html").read_text(), Path(f"{tmp}/r.md").read_text()
+            self.assertIn("Nothing to report.", h)
+            self.assertIn("Trace details", h)
+            self.assertIn("/x/a.log", h)
+            self.assertIn("Nothing to report.", md)
+            self.assertNotIn("/x/a.log", md)  # file paths stay out of the Markdown report
+
+    def test_chapters_names_and_rtl(self):
+        s = open_trace([PROBE], plugins=[Named()])
+        tables = analyze(s.model, 10, None, s.labeler)
+        mods = {str(r[0]): r[0].rtl for t in tables for r in t.rows if isinstance(r[0], RtlName)}
+        self.assertEqual(mods.get("Stage A"), "TOP.tb.dut.a")
+        items = layout(tables, s.plugins.report(s.model))
+        self.assertEqual(items[0].title, "Headline")
+        self.assertTrue(all(x.group == HW_GROUP and x.level == "hw" for x in items[1:]))
+        with tempfile.TemporaryDirectory() as tmp:
+            write_html(f"{tmp}/r.html", tables, s.plugins.report(s.model), {"k": "v"}, [], "T")
+            h = Path(f"{tmp}/r.html").read_text()
+            self.assertIn('class="toc"', h)
+            self.assertIn('<div class="rtl">', h)  # hardware-detail tables show the RTL path inline
+            self.assertIn('title="RTL: top.s0"', h)  # the body uses a tooltip
+            self.assertIn("<dt>x</dt><dd>an x</dd>", h)
+            write_md(f"{tmp}/r.md", tables, s.plugins.report(s.model), {"k": "v"}, [], "T")
+            self.assertNotIn("Interfaces (ready/valid)", Path(f"{tmp}/r.md").read_text())
+            write_csv(f"{tmp}/csv", [Table("Headline", ["module", "x"], [[RtlName("Stage zero", "top.s0"), 1]],
+                                           key="headline")])
+            self.assertEqual(Path(f"{tmp}/csv/headline.csv").read_text().splitlines(),
+                             ["module,module (RTL),x", "Stage zero,top.s0,1"])
+        kern = Writer(s.model, s.labeler, s.emitted, "kernel", s.plugins.keep()).build()
+        threads = {e["args"]["name"] for e in kern["traceEvents"] if e.get("name") == "thread_name"}
+        self.assertEqual(threads, {"state"})
+        full = Writer(s.model, s.labeler, s.emitted).build()
+        procs = [e["args"]["name"] for e in full["traceEvents"] if e.get("name") == "process_name"]
+        self.assertIn("Stage A  [dut.a]", procs)
 
 
 class TileLinkTrace(unittest.TestCase):
@@ -300,3 +366,77 @@ def _mini_elf(syms) -> bytes:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReaderRobustness(unittest.TestCase):
+    """Review fixes: file order, malformed lines, --from/--to window, ELF labels, non-finite values."""
+
+    def test_files_out_of_order(self):
+        lines = PROBE.read_text().splitlines(keepends=True)
+        half = len(lines) // 2
+        ref = open_trace([PROBE]).model.trace
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.log", Path(tmp) / "b.log"
+            a.write_text("".join(lines[half:]))
+            b.write_text("".join(lines[:half]))
+            tr = open_trace([a, b]).model.trace
+        self.assertEqual(len(tr.events), len(ref.events))
+        self.assertEqual(sorted((m.kind, m.t0, m.cycles) for m in tr.markers),
+                         sorted((m.kind, m.t0, m.cycles) for m in ref.markers))
+
+    def test_malformed_line_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "x.log"
+            p.write_text(PROBE.read_text() + "@RT 4500x EVENT TOP.tb.dut 9 00\n@RT 1 EVENT TOP.tb.dut nine 0\n")
+            tr = open_trace([p]).model.trace
+        self.assertTrue(any("2 malformed" in w for w in tr.warnings))
+        self.assertEqual(len(tr.events), len(open_trace([PROBE]).model.trace.events))
+
+    def test_window_clips_end_and_keeps_last_cycle(self):
+        full = open_trace([PROBE]).model.trace
+        cyc = sorted({e.cycle for e in full.events})
+        lo, hi = cyc[len(cyc) // 4], cyc[len(cyc) // 2]
+        tr = open_trace([PROBE], t_from=lo, t_to=hi).model.trace
+        self.assertEqual(tr.end_ts, hi + 1)
+        self.assertEqual(tr.start_ts, lo)
+        got = {e.cycle for e in tr.events}
+        self.assertIn(hi, got)
+        self.assertIn(lo, got)
+        self.assertTrue(all(lo <= c <= hi for c in got))
+
+    def test_elf_prefers_object_over_label(self):
+        syms = [("A", 0x40000024, 2048, 0x11), ("_sec_start", 0x40000024, 0, 0x10), ("_end_lbl", 0x40001000, 0, 0x10)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.elf"
+            path.write_bytes(_mini_elf(syms))
+            e = Elf(path)
+            self.assertEqual(e.symbolize(0x40000024), "A")
+            self.assertEqual(e.symbolize(0x40000028), "A+0x4")
+            self.assertEqual(e.symbolize(0x40001000), "_end_lbl")
+            self.assertIsNone(e.symbolize(0x40001004))  # past a bare label: nothing
+
+    def test_non_finite_values(self):
+        from rtltrace.report import fmt_num
+        self.assertEqual(fmt_num(float("nan")), "nan")
+        self.assertEqual(fmt_num(float("inf")), "inf")
+        from rtltrace import perfetto
+        self.assertEqual(json.loads(json.dumps(perfetto._finite({"a": [float("nan"), 1.5]}))), {"a": [None, 1.5]})
+
+
+class WriterRobustness(unittest.TestCase):
+    def test_md_text_csv_and_anchors(self):
+        from rtltrace.report import _md_cell, write_text
+        self.assertEqual(_md_cell("busy (< 1 %) a|b"), "busy (< 1 %) a\\|b")
+        self.assertEqual(_md_cell("<emitrtl>/x"), "&lt;emitrtl>/x")
+        secs = [Section("Notes", [], [], "line one\nline two"), Section("T", ["a", "b"], [[1], [2, 3]])]
+        buf = io.StringIO()
+        write_text(buf, [], secs)  # a short row and a text-only section
+        self.assertIn("line two", buf.getvalue())
+        with tempfile.TemporaryDirectory() as tmp:
+            write_csv(tmp, [Table("Same name", ["x"], [[1]]), Table("Same name!", ["x"], [[2]])])
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["same_name.csv", "same_name_2.csv"])
+            out = Path(tmp) / "r.html"
+            write_html(str(out), [], [Section("Findings", ["a"], [[1]], group="Findings"),
+                                      Section("Findings", ["a"], [[2]], group="Other")], {}, [])
+            ids = __import__("re").findall(r'id="([^"]+)"', out.read_text())
+            self.assertEqual(len(ids), len(set(ids)), ids)

@@ -38,11 +38,13 @@ from collections import Counter, defaultdict
 from fnmatch import fnmatch
 from pathlib import Path
 
-from rtltrace.plugin import Plugin, Section
+from rtltrace.plugin import HW_GROUP, Plugin, RtlName, Section
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redefine_common import (_r, _ratio, ce_timelines, count_retired, kernel_windows, load_workload,  # noqa: E402
-                             plugin_regions, section_of)
+import redefine_vocab as V  # noqa: E402
+from redefine_common import (Names, _r, _ratio, _seg_at, ce_key, ce_label, ce_timelines, count_retired,  # noqa: E402
+                             counters_in, kernel_windows, load_workload, phase_analysis, plugin_regions, publish,
+                             section_of, window_names)
 
 _MSHR = re.compile(r"\.mshrs(\.mshrs_\d+)?$")
 _CORE = re.compile(r"\.core(?:_(\d+))?\.")
@@ -84,6 +86,9 @@ class CacheMetrics(Plugin):
         self.mode = mode if mode != "auto" else ("probe" if {"llc_access", "l1d_access"} & have else "infer")
         self.regions = plugin_regions(ctx)
         self.results: list[dict] = []
+        self.issues: list[dict] = []
+        self.names = Names(a, self.regions, self.warnings, ctx.trace)
+        self.src = {p.name: p.meta.get("src") for p in ctx.trace.probes.values()}
 
     # ------------------------------------------------------------------ windows
     def _windows(self, m) -> list[tuple[str, float, float]]:
@@ -91,7 +96,7 @@ class CacheMetrics(Plugin):
         ces = ce_timelines(m)
         if ces or self.args.get("from") or self.args.get("to"):
             ws = kernel_windows(m, ces, max(1, len(self.kernels)), self.args, self.warnings)
-            names = self.kernels if len(self.kernels) == len(ws) else [f"kernel{i}" for i in range(len(ws))]
+            names = window_names(self.kernels, len(ws))
             out += [(n, w0, w1) for n, (w0, w1) in zip(names, ws)]
         return out
 
@@ -106,6 +111,8 @@ class CacheMetrics(Plugin):
     # ------------------------------------------------------------------ derive
     def derive(self, m, out):
         windows = self._windows(m)
+        tls = ce_timelines(m)
+        self.pa = phase_analysis(m, self.args, tls, []) if tls else None
         cmu = self._cmu_periods(m)
         if self.mode == "probe":
             llc_ev = sorted(m.events("llc_access"), key=lambda e: e.ts)
@@ -148,6 +155,7 @@ class CacheMetrics(Plugin):
             self.results.append(res)
 
         self._perfetto(m, out, llc, l1d_ev)
+        publish(m, "cache", self.summary())
         if self.args.get("cache_json"):
             Path(self.args["cache_json"]).write_text(json.dumps(self.summary(), indent=2))
 
@@ -190,7 +198,7 @@ class CacheMetrics(Plugin):
             s = per[cache]
             s["refills"] = sum(1 for t in refills.get(cache, ()) if w0 <= t <= w1)
             s["writebacks"] = sum(1 for t in wbs.get(cache, ()) if w0 <= t <= w1)
-            row = {"cache": m.trace.module_short(cache), **_ratios(dict(s))}
+            row = {"cache": m.trace.module_short(cache), "rtl_path": cache, **_ratios(dict(s))}
             if self.mode == "probe":
                 # LLC_out Gets not issued by an MSHR come from the CMU (maintenance), inside its busy periods.
                 port_inst = max((pi for pi in out_gets if cache.startswith(pi)), key=len, default=None)
@@ -199,7 +207,8 @@ class CacheMetrics(Plugin):
                 row["llc_out_gets_in_cmu"] = sum(1 for t in gets if any(c0 <= t <= c1 for c0, c1 in cmu))
                 self._check(row)
             rows.append(row)
-        by_client = [{"cache": m.trace.module_short(cache), "client": cl, **_ratios(dict(c))}
+        by_client = [{"cache": m.trace.module_short(cache), "client": cl, "client_name": str(self.names.client(cl)),
+                      **_ratios(dict(c))}
                      for (cache, cl), c in sorted(clients.items(), key=lambda x: -x[1]["accesses"])]
         return rows, by_client
 
@@ -220,17 +229,15 @@ class CacheMetrics(Plugin):
                     per[p.inst]["dma_write_bytes" if t.opcode != "Get" else "dma_read_bytes"] += t.nbytes
                     if t.latency is not None:
                         lat[p.inst].append(t.latency)
-        overlaps = [e for e in m.events("spm_s3_overlap") if w0 <= e.ts <= w1]
+        overlaps = sorted((e for e in m.events("spm_s3_overlap") if w0 <= e.ts <= w1), key=lambda e: e.ts)
         if overlaps and warn:
-            self.warnings.append(f"spm_s3_overlap fired {len(overlaps)} times (first at cycle {overlaps[0].ts:.0f}, "
-                                 f"{m.trace.module_short(overlaps[0].probe.inst)}): a CE load took the store path "
-                                 "while a DMA write was in progress - possible scratchpad corruption")
+            self._overlap_issue(m, overlaps)
         for e in overlaps:
             per[e.probe.inst]["s3_overlap"] += 1
         rows = []
         for inst in sorted(per):
             c, ls = per[inst], sorted(lat.get(inst, []))
-            rows.append({"cache": m.trace.module_short(inst), "core": _core_of(inst),
+            rows.append({"cache": m.trace.module_short(inst), "rtl_path": inst, "core": _core_of(inst),
                          **{k: c.get(k, 0) for k in ("loads", "stores", "dma_write_bytes", "dma_read_bytes",
                                                      "ce_blocked_cycles", "dma_wait_cycles", "s3_overlap")},
                          "dma_beat_latency_p50": ls[len(ls) // 2] if ls else None})
@@ -243,7 +250,39 @@ class CacheMetrics(Plugin):
                 c = per[section_of(self.regions, v.get("addr")) or "–"]
                 c["accesses"] += 1
                 c["hits" if v.get("hit") else "misses"] += 1
-        return [{"section": s, **_ratios(dict(c))} for s, c in sorted(per.items(), key=lambda x: -x[1]["accesses"])]
+        return [{"section": s, "name": str(self.names.section(s)) if s != "–" else s, **_ratios(dict(c))}
+                for s, c in sorted(per.items(), key=lambda x: -x[1]["accesses"])]
+
+    def _overlap_issue(self, m, evs):
+        """spm_s3_overlap events -> one issue: count per CE, where (CE, PC region, address) the first one happened,
+        and the RTL reference."""
+        per_ce = Counter(ce_label(ce_key(e.probe.inst)) for e in evs if ce_key(e.probe.inst))
+        regions = Counter()
+        segs = {k: (v, [s.t0 for s in v]) for k, v in (self.pa or {}).get("phases", {}).items()}
+        for e in evs:
+            k = ce_key(e.probe.inst)
+            sg = _seg_at(segs[k][0], segs[k][1], e.ts) if k in segs else None
+            if sg is not None:
+                regions[sg.label] += 1
+        e0 = evs[0]
+        addr = e0.vals.get("addr")
+        sec = section_of(self.regions, addr) if addr is not None else None
+        where = f"{self.names.section(sec)}" if sec and sec != "–" else (f"0x{addr:x}" if addr is not None else "?")
+        r = self.regions.lookup(addr) if self.regions is not None and addr is not None else None
+        if r is not None:
+            where += f"+0x{r.offset:x}"
+        k0 = ce_key(e0.probe.inst)
+        issue = {"id": "spm_s3_overlap", "count": len(evs), "per_ce": dict(sorted(per_ce.items())),
+                 "regions": {k: v for k, v in regions.most_common()}, "first_cycle": round(e0.ts),
+                 "first_ce": ce_label(k0) if k0 else None, "first_addr": where, "rtl_path": e0.probe.inst,
+                 "probe": "spm_s3_overlap", "src": self.src.get("spm_s3_overlap")}
+        self.issues.append(issue)
+        top = ", ".join(f"{V.region_name(k)} ×{v}" for k, v in regions.most_common(3))
+        self.warnings.append(
+            f"Scratchpad hazard: {len(evs)} CE loads hit a scratchpad while a DMA write into it was in flight "
+            f"({', '.join(f'{c} ×{n}' for c, n in sorted(per_ce.items()))}); first at cycle {issue['first_cycle']} on "
+            f"{issue['first_ce']} at {where}{f'; in regions {top}' if top else ''}. Such a load may return the DMA's "
+            f"data instead of the old value. [RTL: {e0.probe.inst} · spm_s3_overlap · {issue['src']}]")
 
     def _check(self, row):
         what = f"{row['cache']}"
@@ -280,7 +319,7 @@ class CacheMetrics(Plugin):
         rows = []
         for inst in sorted(per):
             s, core = per[inst], _core_of(inst)
-            row = {"cache": m.trace.module_short(inst), "core": core,
+            row = {"cache": m.trace.module_short(inst), "rtl_path": inst, "core": core,
                    **_ratios({k: s[k] for k in ("accesses", "hits", "misses", "read_misses", "write_misses",
                                                 "secondary")}),
                    "cmu_writebacks": sum(1 for t in l1d_cmu_wb.get(inst, ()) if w0 <= t <= w1),
@@ -288,6 +327,10 @@ class CacheMetrics(Plugin):
                    "mpki": None}
             if whole_run and self.retired and core in self.retired and self.retired[core]:
                 row["mpki"] = 1000 * s["misses"] / self.retired[core]
+            elif self.pa and ce_key(inst) in self.pa["points"]:  # ce_marker instret counters, any window
+                ir = counters_in(self.pa["points"][ce_key(inst)], w0, w1)
+                if ir and ir[0]:
+                    row["mpki"] = 1000 * s["misses"] / ir[0]
             rows.append(row)
         return rows
 
@@ -315,12 +358,14 @@ class CacheMetrics(Plugin):
 
     # ------------------------------------------------------------------ perfetto
     def _perfetto(self, m, out, llc, l1d_ev):
-        proc = out.process("Cache metrics", sort=6)
+        proc = out.process("Cache hit rates", sort=4)
         series = defaultdict(list)
         for cache, ts, v in llc:
-            series[f"LLC {m.trace.module_short(cache)}"].append((ts, v.get("hit", 0)))
+            series[str(self.names.module(cache, "LLC"))].append((ts, v.get("hit", 0)))
         for e in l1d_ev:
-            series[f"L1-D {m.trace.module_short(e.probe.inst)}"].append((e.ts, e.vals.get("hit", 0)))
+            k = ce_key(e.probe.inst)
+            series[f"{ce_label(k) if k else m.trace.module_short(e.probe.inst)} L1-D"].append(
+                (e.ts, e.vals.get("hit", 0)))
         marks = self.args.get("miss_marks") in ("1", "true", "yes")
         for name, pts in sorted(series.items()):
             bins = defaultdict(lambda: [0, 0])
@@ -338,57 +383,101 @@ class CacheMetrics(Plugin):
 
     # ------------------------------------------------------------------ outputs
     def summary(self) -> dict:
-        return {"mode": self.mode, "windows": self.results, "warnings": self.warnings}
+        return {"mode": self.mode, "windows": self.results, "issues": self.issues, "warnings": self.warnings}
 
     def report(self, m) -> list[Section]:
-        note = ("Counted at each request's first lookup. merged = waited behind a miss to the same line (RPQ). "
-                "expected refills = Gets the misses must issue; it should equal refills.") if self.mode == "probe" \
-            else "mode=infer (approximate): reads only, miss = a fill Get for the same line while the read was pending."
+        G, b = V.G_MEM
+        kern = [r for r in self.results if r["window"] != "run"] or self.results
+        run = [r for r in self.results if r["window"] == "run"]
+        out = []
+        llc = lambda s_: self.names.module(s_["rtl_path"], "LLC") if s_.get("rtl_path") else s_["cache"]  # noqa
+        ce = lambda s_: RtlName(f"CE{s_['core']}", s_.get("rtl_path", s_["cache"])) if s_.get("core") is not None \
+            else s_["cache"]  # noqa: E731
+        if self.regions is not None:
+            rows = [[r["window"], self.names.section(s_["section"]) if s_["section"] != "–" else "other",
+                     s_["accesses"], s_["hits"], s_["misses"], _pct(s_["hit_ratio"])]
+                    for r in kern for s_ in r.get("llc_by_section", [])]
+            if rows:
+                out.append(Section("LLC hit/miss by buffer / memory section",
+                                   ["kernel", "buffer / section", "accesses", "hits", "misses", "hit %"], rows,
+                                   "A kernel input read once from memory misses on first touch (hit % ≈ 0 is "
+                                   "expected); a buffer read repeatedly should hit.",
+                                   legend=V.legend("accesses / hits / misses", "hit %"), group=G, order=b,
+                                   key="Cache metrics · LLC hit/miss by kernel section"))
+        rows = [[r["window"], self.names.client(s_["client"]), s_["accesses"], s_["hits"], s_["misses"],
+                 _pct(s_["hit_ratio"])] for r in kern for s_ in r["llc_by_client"]]
+        out.append(Section("LLC hit/miss by requester", ["kernel", "requester", "accesses", "hits", "misses",
+                                                         "hit %"], rows,
+                           legend=V.legend("accesses / hits / misses", "hit %"), group=G, order=b + 1,
+                           key="Cache metrics · LLC hit/miss by requester"))
+        cols = ["kernel", "cache", "accesses", "hits", "misses", "hit %", "read misses", "write misses", "merged",
+                "dirty victim", "refills", "writebacks", "flush/clean ops"]
+        rows = [[r["window"], llc(s_), s_["accesses"], s_["hits"], s_["misses"], _pct(s_["hit_ratio"]),
+                 s_["read_misses"], s_["write_misses"], s_["merged"], s_["dirty_victim"], s_["refills"],
+                 s_["writebacks"], r["cmu_ops"]] for r in kern for s_ in r["llc"]]
+        if self.mode != "probe":
+            cols, rows = cols[:8], [r_[:8] for r_ in rows]
+        out.append(Section("LLC summary", cols, rows,
+                           "Counted at each request's first lookup." if self.mode == "probe" else
+                           "Inferred (no llc_cache probes): reads only; a miss = a refill Get for the same line "
+                           "while the read was pending. Re-run with +rtltrace_llc_cache_on for exact numbers.",
+                           legend=V.legend("accesses / hits / misses", "hit %", "merged", "dirty victim",
+                                           "refills / writebacks"),
+                           group=G, order=b + 2, key="Cache metrics · LLC summary"))
+        if self.mode == "probe":
+            rows = [[r["window"], ce(s_), s_["accesses"], s_["hits"], s_["misses"], _pct(s_["hit_ratio"]),
+                     s_["read_misses"], s_["write_misses"], s_["secondary"], s_["llc_in_dcache_gets"],
+                     s_["cmu_writebacks"], _r(s_["mpki"])] for r in kern for s_ in r["l1d"]]
+            out.append(Section("L1-D hit/miss per CE",
+                               ["kernel", "CE", "accesses", "hits", "misses", "hit %", "read misses", "write misses",
+                                "secondary misses", "L1-D refills at LLC", "flush writebacks", "MPKI"], rows,
+                               "Cacheable CE loads/stores only: scratchpad, uncached and maintenance accesses are not "
+                               "counted. MPKI uses the CE's retired instructions in the same window.",
+                               legend=V.legend("accesses / hits / misses", "hit %", "secondary misses", "MPKI"),
+                               group=G, order=b + 3, key="Cache metrics · L1-D hit/miss per CE"))
+            if self.regions is not None:
+                rows = [[r["window"], self.names.section(s_["section"]) if s_["section"] != "–" else "other",
+                         s_["accesses"], s_["hits"], s_["misses"], _pct(s_["hit_ratio"])]
+                        for r in kern for s_ in r.get("l1d_by_section", [])]
+                if rows:
+                    out.append(Section("L1-D hit/miss by buffer / memory section",
+                                       ["kernel", "buffer / section", "accesses", "hits", "misses", "hit %"], rows,
+                                       group=G, order=b + 4, key="Cache metrics · L1-D hit/miss by kernel section"))
+        rows = [[r["window"], ce(s_), s_["loads"], s_["stores"], s_["dma_write_bytes"], s_["dma_read_bytes"],
+                 s_["dma_beat_latency_p50"], s_["ce_blocked_cycles"], s_["dma_wait_cycles"], s_["s3_overlap"]]
+                for r in kern for s_ in r.get("spm", [])]
+        if rows:
+            out.append(Section("Scratchpad: CE and DMA sharing it",
+                               ["kernel", "CE", "CE loads", "CE stores", "DMA bytes in", "DMA bytes out",
+                                "DMA beat latency p50", "CE stalled by DMA (cycles)", "DMA stalled by CE (cycles)",
+                                "CE reads during DMA write"], rows,
+                               "Group l1d_spm (+rtltrace_l1d_spm_on). The CE and the CR-DMA share each CE's "
+                               "scratchpad port.",
+                               legend=V.legend("CE stalled by DMA", "DMA stalled by CE", "CE reads during DMA write"),
+                               group=G, order=b + 5, key="Cache metrics · scratchpad per CE"))
+        # hardware detail: full LLC counters (with the refill / writeback consistency inputs) for every window
         cols = ["window", "cache", "accesses", "hits", "misses", "hit %", "miss %", "read misses", "write misses",
                 "merged", "dirty victim", "fetch-modify", "refills", "expected refills", "writebacks", "CMU ops"]
-        rows = [[r["window"], s["cache"], s["accesses"], s["hits"], s["misses"], _pct(s["hit_ratio"]),
-                 _pct(s["miss_ratio"]), s["read_misses"], s["write_misses"], s["merged"], s["dirty_victim"],
-                 s["fetch_modify"], s["refills"], s["expected_refills"], s["writebacks"], r["cmu_ops"]]
-                for r in self.results for s in r["llc"]]
+        rows = [[r["window"], llc(s_), s_["accesses"], s_["hits"], s_["misses"], _pct(s_["hit_ratio"]),
+                 _pct(s_["miss_ratio"]), s_["read_misses"], s_["write_misses"], s_["merged"], s_["dirty_victim"],
+                 s_["fetch_modify"], s_["refills"], s_["expected_refills"], s_["writebacks"], r["cmu_ops"]]
+                for r in self.results for s_ in r["llc"]]
         if self.mode != "probe":
-            cols, rows = cols[:7], [r[:7] for r in rows]  # the rest needs the cache probes
-        out = [Section(f"Cache metrics · LLC hit/miss ({self.mode})", cols, rows, note)]
-        rows = [[r["window"], s["cache"], s["client"], s["accesses"], s["hits"], s["misses"], _pct(s["hit_ratio"])]
-                for r in self.results for s in r["llc_by_client"]]
-        out.append(Section("Cache metrics · LLC hit/miss by requester",
-                           ["window", "cache", "client", "accesses", "hits", "misses", "hit %"], rows))
-        if self.mode == "probe":
-            rows = [[r["window"], s["cache"], s["accesses"], s["hits"], s["misses"], _pct(s["hit_ratio"]),
-                     _pct(s["miss_ratio"]), s["read_misses"], s["write_misses"], s["secondary"],
-                     s["llc_in_dcache_gets"], s["cmu_writebacks"], _r(s["mpki"])]
-                    for r in self.results for s in r["l1d"]]
-            out.append(Section("Cache metrics · L1-D hit/miss per CE",
-                               ["window", "cache", "accesses", "hits", "misses", "hit %", "miss %", "read misses",
-                                "write misses", "secondary", "D$ Gets at LLC", "CMU writebacks", "MPKI"], rows,
-                               "Cacheable loads/stores only (SPM, uncached and maintenance commands excluded). "
-                               "secondary = miss merged into an in-flight MSHR. MPKI uses the whole log's retired "
-                               "instructions, so it is given for the 'run' window only."))
-        rows = [[r["window"], s["cache"], s["loads"], s["stores"], s["dma_write_bytes"], s["dma_read_bytes"],
-                 s["dma_beat_latency_p50"], s["ce_blocked_cycles"], s["dma_wait_cycles"], s["s3_overlap"]]
-                for r in self.results for s in r.get("spm", [])]
-        if rows:
-            out.append(Section("Cache metrics · scratchpad per CE",
-                               ["window", "cache", "CE loads", "CE stores", "DMA bytes in", "DMA bytes out",
-                                "DMA beat latency p50", "CE blocked (cycles)", "DMA waits (cycles)",
-                                "s3 overlap"], rows,
-                               "Group l1d_spm (+rtltrace_l1d_spm_on). CE blocked = CE request held off by a DMA "
-                               "burst in progress; DMA waits = DMA beat held off because the CE won arbitration; "
-                               "s3 overlap must be 0."))
-        if self.regions is not None:
-            for key, what in (("llc_by_section", "LLC"), ("l1d_by_section", "L1-D")):
-                rows = [[r["window"], s["section"], s["accesses"], s["hits"], s["misses"], _pct(s["hit_ratio"])]
-                        for r in self.results for s in r.get(key, [])]
-                if rows:
-                    out.append(Section(f"Cache metrics · {what} hit/miss by kernel section",
-                                       ["window", "section", "accesses", "hits", "misses", "hit %"], rows,
-                                       f"Sections from {self.regions.source}."))
+            cols, rows = cols[:7], [r_[:7] for r_ in rows]
+        out.append(Section(f"LLC hit/miss, all windows ({self.mode})", cols, rows,
+                           "'run' = the whole trace including loading inputs and reading results back. expected "
+                           "refills = Gets the traced misses must issue; it should equal refills.",
+                           group=HW_GROUP, order=920, level="hw", key=f"Cache metrics · LLC hit/miss ({self.mode})"))
+        if run and self.mode == "probe":
+            rows = [[r["window"], ce(s_), s_["accesses"], s_["hits"], s_["misses"], _pct(s_["hit_ratio"]),
+                     _r(s_["mpki"])] for r in run for s_ in r["l1d"]]
+            out.append(Section("L1-D hit/miss over the whole run", ["window", "CE", "accesses", "hits", "misses",
+                                                                    "hit %", "MPKI"], rows,
+                               group=HW_GROUP, order=920.1, level="hw", key="Cache metrics · L1-D whole run"))
         if self.warnings:
-            out.append(Section("Cache metrics · warnings", ["warning"], [[w] for w in self.warnings]))
+            G, b = V.G_CHECK
+            out.append(Section("Tool warnings · caches", ["warning"], [[w] for w in self.warnings],
+                               group=G, order=b + 13, key="Cache metrics · warnings"))
         return out
 
 

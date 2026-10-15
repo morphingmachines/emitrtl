@@ -78,14 +78,13 @@ def key_links(m: Model) -> list[Link]:
     out = []
     for k, lst in tagged.items():
         lst.sort(key=lambda x: x[0].ts)
-        last: dict[tuple[int, str], Event] = {}
+        last: dict[int, dict[str, Event]] = defaultdict(dict)  # key value -> probe name -> latest event
         for e, fname in lst:
             v = e.vals[fname]
-            for (val, probe), prev in list(last.items()):
-                if val == v and probe != e.probe.name:
-                    out.append(Link(f"key:{k}", prev, e, False, f"same {k}={v:#x}"))
-                    del last[(val, probe)]
-            last[(v, e.probe.name)] = e
+            open_ = last[v]
+            for probe in [pn for pn in open_ if pn != e.probe.name]:
+                out.append(Link(f"key:{k}", open_.pop(probe), e, False, f"same {k}={v:#x}"))
+            open_[e.probe.name] = e
     return out
 
 

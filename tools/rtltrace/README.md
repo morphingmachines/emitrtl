@@ -63,7 +63,8 @@ Probe output goes to **stderr**, one line per event, prefixed `@RT`; capture it 
 ```sh
 cd emitrtl/tools/rtltrace        # or put this directory on PYTHONPATH
 python3 -m rtltrace perfetto sim.stderr -o trace.json --elf prog.elf --tl-hops   # open in ui.perfetto.dev
-python3 -m rtltrace report   sim.stderr -o report.html [--csv tables/]
+python3 -m rtltrace perfetto sim.stderr -o small.json --view kernel --plugin p.py # plugin tracks only (small)
+python3 -m rtltrace report   sim.stderr -o report.html [--csv tables/] [--md report.md] [--title "..."]
 python3 -m rtltrace text     sim.stderr --groups llc
 python3 -m rtltrace points   generated_sv_dir/<top>/trace_points.json --grep llc
 python3 -m rtltrace args     --on llc_cache,l1d_cache --off ce      # plusargs for groups
@@ -72,9 +73,11 @@ python3 -m rtltrace elf      prog.elf --lookup 0x40000024           # ELF symbol
 
 Common options: `--elf` (symbolize addresses), `--catalog trace_points.json` (decode probes whose DECL line never
 printed, e.g. a ChiselSim test without a reset pulse), `--regions` (address regions, below), `--only <instance
-substring>`, `--from/--to <cycle>`, `--period <time units per cycle>`, `--stall <cycles>`, `--links
+substring>`, `--from/--to <cycle>` (inclusive; percentages are over the window), `--period <time units per cycle>`, `--stall <cycles>`, `--links
 rtltrace_links.json`, `--tl-hops [--line <bytes>]`, `--plugin file.py[:Class]` and `--plugin-arg key=value`
-(both repeatable). `report` also takes `--csv <dir>` and `--top <n>` (rows in the slowest/longest tables).
+(both repeatable). `report` also takes `--csv <dir>`, `--md <file>` (the report body as Markdown, without the
+hardware-detail appendix and the trace details: input file paths, time base), `--title` and `--top <n>` (rows in the slowest/longest tables). `perfetto` takes `--view
+full|kernel` (kernel: plugin processes plus the probes the plugins list in `perfetto_keep`).
 The clock period is inferred from the event timestamps; pass `--period` when a trace is very short (a handful of
 events cannot reveal it).
 
@@ -85,7 +88,13 @@ What you get:
 - **Report**: input-side vs output-side stall per module (bottleneck ranking), per-interface throughput and stalls,
   TileLink latency percentiles and bandwidth per port/opcode/client, source-ID usage, time in each FSM state, hangs,
   slowest transactions, traffic by address region; then every plugin's sections. `--csv` writes each table, generic
-  and plugin, as `<title>.csv`.
+  and plugin, as `<title>.csv` (or the section's `key`). When plugin sections set `order`, the report becomes
+  chapters (`group`) with a table of contents and per-table legends, and the generic tables move to an
+  "Appendix · Hardware detail".
+- **Names and RTL traceability**: plugins may give friendly names to modules, TileLink clients/ports, probes and
+  address regions (`Plugin.display`). A friendly name is an `RtlName`: the RTL identifier stays attached — an HTML
+  tooltip (shown inline in hardware-detail tables), a `<column> (RTL)` CSV column, the Perfetto process name
+  `Friendly  [rtl.path]` and the `rtl_path` / `probe` / `chisel_src` args on every module slice.
 - **Relationships**: TileLink request/response pairing is exact (protocol). `--tl-hops` links the same cache line
   across ports (heuristic: the downstream transaction is nested in the upstream one). `--links` declares others:
   `[{"name": "enq2deq", "from": {"probe": "*enq", "key": "id"}, "to": {"probe": "*deq", "key": "id"}, "pairing": "fifo"}]`.
@@ -119,8 +128,13 @@ that.
 
 A plugin is a `rtltrace.plugin.Plugin` subclass: `setup(ctx)` (ELF, `--plugin-arg`s, trace, regions),
 `annotate(field, value, event)` (custom labels), `derive(model, out)` (add Perfetto processes, tracks, spans,
-counters, instants and flows through `out`) and `report(model)` (return `Section`s for the HTML/CSV report). A plugin
-that raises is disabled with a warning; the rest of the output continues. See `rtltrace/plugin.py` for the contract
+counters, instants and flows through `out`), `report(model)` (return `Section`s for the HTML/CSV report),
+`display(kind, name)` (friendly name for a `module` path, TileLink `client` / `port`, `probe` or address `region`;
+None = no opinion), `card()` (entries for the report header) and `perfetto_keep` (probe globs kept in the Perfetto
+kernel view). A `Section` may set `legend` (column → meaning), `group` (chapter), `order`, `level` (`"hw"` =
+hardware detail: RTL names inline, left out of `--md`), `key` (stable CSV name) and `empty` (what to say when the
+table has no rows, instead of "Nothing to show."). A plugin that raises is disabled
+with a warning; the rest of the output continues. See `rtltrace/plugin.py` for the contract
 and `examples/llc_miss.py` for a complete example:
 
 ```sh
@@ -131,7 +145,8 @@ python3 -m rtltrace report sim.stderr -o r.html --plugin examples/llc_miss.py \
 The REDEFINE plugins (γe/ρ/φ metrics, CE phases from PC markers, CR-DMA utilisation, cache hit/miss, and the
 one-command `redefine_report.py`) live in [`../rtltrace-plugins`](../rtltrace-plugins/README.md).
 
-From Python, `rtltrace.open_trace(traces, elf=, catalog=, regions="auto", plugins=[...], plugin_args={...})` runs the
+From Python, `rtltrace.open_trace(traces, elf=, catalog=, regions=None, plugins=[...], plugin_args={...})` (`regions="auto"` finds
+`kernel_sections.json` as the CLI does; the CLI default is `auto`, the API default is no regions) runs the
 same pipeline and returns a `Session` (`model`, `labeler`, `plugins`, `emitted`, `regions`, `warnings`).
 
 ## Trace format v1

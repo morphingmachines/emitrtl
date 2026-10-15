@@ -31,13 +31,14 @@ from collections import Counter, defaultdict
 from fnmatch import fnmatch
 from pathlib import Path
 
-from rtltrace.plugin import Plugin, Section
+from rtltrace.plugin import Plugin, RtlName, Section
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from redefine_common import (_r, ce_timelines, kernel_windows, load_workload, plugin_regions,  # noqa: E402
-                             section_of, sub_windows)
+import redefine_vocab as V  # noqa: E402
+from redefine_common import (Names, _r, ce_timelines, kernel_windows, load_workload, plugin_regions,  # noqa: E402
+                             publish, section_of, sub_windows, window_names)
 
-DMA_TYPES = {1: "LLC2SPM", 2: "SPM2LLC", 3: "LLC2LLC", 4: "GRP_SCATTER", 5: "GRP_GATHER", 6: "CR2CR", 7: "P2CR"}
+DMA_TYPES = V.DMA_TYPES
 
 
 def _pct(xs, q):
@@ -61,6 +62,12 @@ def _union(iv, w0, w1) -> float:
 class DmaMetrics(Plugin):
     name = "dma-metrics"
     requires = ["CeState"]
+    fields = {"dma_start/type": "dma_type"}
+    tags = {"dma_type"}
+
+    def annotate(self, f, value, ev):
+        t = DMA_TYPES.get(value)
+        return (t, f"{t} ({value})") if t else None
 
     def setup(self, ctx):
         a = ctx.args
@@ -75,11 +82,15 @@ class DmaMetrics(Plugin):
         self.bin = float(a.get("bin", 1000))
         self.kernels = [k.name for k in load_workload(a["launch"])] if a.get("launch") else []
         self.warnings: list[str] = []
+        self.issues: list[dict] = []
+        self.txns_seen = True
+        self.declared = False
         self.windows: list[dict] = []
         self.requests: list[dict] = []
         self.gate: Counter = Counter()
         self.regions = plugin_regions(ctx)
         self.by_section: list[dict] = []
+        self.names = Names(a, self.regions, self.warnings, ctx.trace)
 
     # ------------------------------------------------------------------ helpers
     def _ce_of(self, addr) -> int | None:
@@ -95,6 +106,7 @@ class DmaMetrics(Plugin):
     def _engine(self, txns, a, b) -> dict:
         w = [t for t in txns if a <= t.start < b]
         cyc = b - a
+        end = lambda t: b if t.end is None else min(t.end, b)  # noqa: E731 - unanswered at trace end: open
         lat = [t.end - t.start for t in w if t.done]
         gets = [t for t in w if t.opcode == "Get"]
         gap = [y.start - x.start for x, y in zip(gets, gets[1:])]
@@ -102,22 +114,24 @@ class DmaMetrics(Plugin):
         rd = sum(t.nbytes for t in gets)
         return {"txns": len(w), "gets": len(gets), "puts": len(w) - len(gets), "bytes": by,
                 "bytes_per_cycle": by / cyc if cyc else None, "read_bytes_per_cycle": rd / cyc if cyc else None,
-                "avg_in_flight": sum(min(t.end, b) - t.start for t in w) / cyc if cyc else None,
-                "active": _union([(t.start, t.end) for t in w], a, b) / cyc if cyc else None,
+                "avg_in_flight": sum(end(t) - t.start for t in w) / cyc if cyc else None,
+                "active": _union([(t.start, end(t)) for t in w], a, b) / cyc if cyc else None,
                 "get_interval_p50": _pct(gap, 0.5), "get_interval_mean": statistics.mean(gap) if gap else None,
                 "latency_p50": _pct(lat, 0.5), "latency_p95": _pct(lat, 0.95)}
 
     # ------------------------------------------------------------------ derive
     def derive(self, m, out):
         starts = sorted(m.events("dma_start"), key=lambda e: e.ts)
+        # a probe's DECL line prints only when its group is on: declared without events = no request was made
+        declared = self.declared = any(p.name == "dma_start" for p in m.trace.probes.values())
         if self.mode == "auto":
-            self.mode = "probe" if starts else "infer"
+            self.mode = "probe" if starts or (declared and not self._txns(m, self.port, self.client)) else "infer"
         tls = ce_timelines(m)
         windows = kernel_windows(m, tls, max(1, len(self.kernels)), self.args, self.warnings)
-        names = self.kernels + [f"kernel{i}" for i in range(len(self.kernels), len(windows))]
+        names = window_names(self.kernels, len(windows))
         if self.mode == "probe":
             txns = self._txns(m, self.mbus)
-            if not txns:
+            if not txns and starts:
                 self.warnings.append(f"no transactions on '{self.mbus}': per-row Get/Put timing not available")
             self._requests(m, starts)
             for e in m.states("dma_gate"):
@@ -125,9 +139,14 @@ class DmaMetrics(Plugin):
                     e.t1 - e.t0
         else:
             txns = self._txns(m, self.port, self.client)
-            if not txns:
-                self.warnings.append(f"no '{self.client}' transactions on '{self.port}' and no dma_start probe: "
-                                     "nothing to measure")
+            if txns and declared:
+                self.warnings.append("the CR-DMA probes recorded no request, but there is CR-DMA traffic on "
+                                     f"'{self.port}': throughput is inferred from that traffic")
+            elif txns:
+                self.warnings.append("CR-DMA probes are not in this trace (group CR_DMA off): DMA requests, their "
+                                     f"CEs and waits are not available; throughput is inferred from '{self.client}' "
+                                     f"traffic on '{self.port}' (turn the probes on with +rtltrace_CR_DMA_on)")
+            self.txns_seen = bool(txns)
         for kname, (w0, w1) in zip(names, windows):
             for sub, a, b in [("whole", w0, w1)] + [s for s in sub_windows(tls, w0, w1) if s[0] != "whole"]:
                 row = {"kernel": kname, "window": sub, "from": a, "to": b, "cycles": b - a,
@@ -135,7 +154,8 @@ class DmaMetrics(Plugin):
                 if self.mode == "probe":
                     reqs = [r for r in self.requests if a <= r["start"] < b]
                     row["requests"] = len(reqs)
-                    row["engine_busy"] = _union([(r["start"], r["done"] or b) for r in reqs], a, b) / (b - a)
+                    row["engine_busy"] = (_union([(r["start"], r["done"] or b) for r in reqs], a, b) / (b - a)
+                                          if b > a else None)
                 self.windows.append(row)
             if self.regions is not None:
                 per = defaultdict(lambda: [0, 0])
@@ -146,7 +166,9 @@ class DmaMetrics(Plugin):
                         c[1] += t.nbytes
                 self.by_section += [{"kernel": kname, "opcode": op, "section": sec, "txns": n, "bytes": b}
                                     for (op, sec), (n, b) in sorted(per.items(), key=lambda x: -x[1][1])]
+        self._issues(m)
         self._perfetto(out, txns)
+        publish(m, "dma", self.summary())
         if self.args.get("dma_json"):
             Path(self.args["dma_json"]).write_text(json.dumps(self.summary(), indent=2))
 
@@ -156,7 +178,7 @@ class DmaMetrics(Plugin):
         # completion sync: dma_retire (exec slot freed after the orchestrator acked the sync), else the CR-DMA's
         # writes on its orchestrator port
         syncs = sorted(e.ts for e in m.events("dma_retire")) or sorted(t.start for t in self._txns(m, self.orch))
-        if not dones:
+        if starts and not dones:
             self.warnings.append("no dma_done events: service times not available")
         for e in starts:
             v = e.vals
@@ -172,50 +194,75 @@ class DmaMetrics(Plugin):
                 "rows": rows, "row_bytes": rb, "bytes": rows * rb, "ce": self._ce_of(spm),
                 "src_section": section_of(self.regions, v.get("src")),
                 "dst_section": section_of(self.regions, v.get("dst")),
+                "queued": queued[q] if q >= 0 else None,
                 "queue_wait": e.ts - queued[q] if q >= 0 else None,
                 "service": done - e.ts if done is not None else None,
                 "done_to_sync": syncs[j] - done if done is not None and j < len(syncs) else None})
 
     def _perfetto(self, out, txns):
-        proc = out.process("CR-DMA", sort=7)
+        proc = out.process("CR-DMA requests", sort=3)
         if self.requests:
             tr = out.track(proc, "requests")
             for r in self.requests:
-                out.span(tr, r["start"], r["done"] or r["start"] + 1, f"{r['type']} {r['bytes']} B",
-                         {k: (hex(v) if k in ("src", "dst") and isinstance(v, int) else v) for k, v in r.items()
-                          if k not in ("start", "done")})
+                src, dst = self._sec(r["src_section"]), self._sec(r["dst_section"])
+                where = f" {src}→{dst}" if src and dst else ""
+                out.span(tr, r["start"], r["done"] or r["start"] + 1, f"{r['type']}{where} {_bytes(r['bytes'])}",
+                         {**{k: (hex(v) if k in ("src", "dst") and isinstance(v, int) else v) for k, v in r.items()
+                             if k not in ("start", "done")}, "probe": "dma_start → dma_done"})
         if txns:
             bins = defaultdict(int)
             for t in txns:
                 bins[int(t.start // self.bin)] += t.nbytes
             pts = [(k * self.bin, round(bins.get(k, 0) / self.bin, 3))
                    for k in range(min(bins), max(bins) + 2)]
-            out.counter(proc, f"bytes/cycle ({self.bin:.0f}-cycle bins)", pts)
+            out.counter(proc, f"DMA bytes/cycle ({self.bin:.0f}-cycle bins)", pts)
+
+    def _issues(self, m):
+        """Correctness events of the CR-DMA: dma_overflow (a descriptor was written while the next slot was still
+        full: the queued request was overwritten) and dma_error (a D beat with denied/corrupt set; info =
+        {source, denied, corrupt})."""
+        for name, what in (("dma_overflow", "descriptor overwritten: a request was written while the next slot "
+                                            "was still full, so a queued request was lost"),
+                           ("dma_error", "TileLink error response (denied / corrupt) on the CR-DMA memory port")):
+            evs = sorted(m.events(name), key=lambda e: e.ts)
+            if not evs:
+                continue
+            e = evs[0]
+            row = {"id": name, "count": len(evs), "first_cycle": e.cycle, "rtl_path": e.probe.inst, "probe": name,
+                   "src": e.probe.meta.get("src"), "what": what}
+            if name == "dma_error":
+                info = e.vals.get("info", 0)
+                row.update(source=info >> 2, denied=bool(info & 2), corrupt=bool(info & 1))
+            self.issues.append(row)
+            self.warnings.append(f"{name} fired {len(evs)} time(s), first at cycle {e.cycle:,}: {what} "
+                                 f"[{e.probe.inst} · {name}" + (f" · {row['src']}]" if row["src"] else "]"))
 
     # ------------------------------------------------------------------ outputs
     def summary(self) -> dict:
         return {"mode": self.mode, "windows": self.windows, "requests": self.requests, "by_section": self.by_section,
-                "gate": dict(self.gate), "warnings": self.warnings}
+                "gate": dict(self.gate), "issues": self.issues, "warnings": self.warnings}
+
+    def _sec(self, label) -> str | None:
+        """Short buffer / section name for slice titles: 'W', 'CE2 scratchpad'."""
+        n = self.names.section(label)
+        return str(n).split(" (")[0] if n else None
 
     def report(self, m) -> list[Section]:
-        cols = ["kernel", "window", "cycles", "txns", "Gets", "Puts", "bytes", "B/cycle", "read B/cycle",
-                "avg in flight",
-                "active %", "Get→Get p50", "Get→Get mean", "latency p50", "latency p95"]
-        rows = [[w["kernel"], w["window"], int(w["cycles"]), w["txns"], w["gets"], w["puts"], w["bytes"],
-                 _r(w["bytes_per_cycle"], 3), _r(w["read_bytes_per_cycle"], 3), _r(w["avg_in_flight"], 3), _r(100 * (w["active"] or 0), 3),
-                 w["get_interval_p50"], _r(w["get_interval_mean"], 3), w["latency_p50"], w["latency_p95"]]
-                for w in self.windows]
-        note = (f"Transactions of clients matching '{self.client}' on '{self.port}' (no CR-DMA probes)."
-                if self.mode == "infer" else f"Transactions on '{self.mbus}' (per-row Gets and Puts).") + \
-            " active % = share of the window with at least one transaction outstanding. A serial engine shows " \
-            "avg in flight < 1 with a Get→Get interval well above the latency."
-        out = [Section(f"CR-DMA · engine ({self.mode})", cols, rows, note)]
+        G, b = V.G_DMA
+        out = []
+        if self.mode == "probe" and not self.requests:
+            return [Section("DMA requests by type and CE", ["type", "CE", "requests", "bytes"], [],
+                            empty="No CR-DMA requests in this run: the kernel does not use the CR-DMA (its probes "
+                                  "are on, so a request would have been seen)." if self.declared else
+                                  "No CR-DMA requests: the dma_start probe is not in this trace (group CR_DMA off; "
+                                  "+rtltrace_CR_DMA_on).",
+                            group=G, order=b + 10, key="CR-DMA · requests by type and CE")] + self._warn_section()
+        if self.mode == "infer" and not self.txns_seen:
+            return [Section("DMA engine throughput", ["kernel", "phase", "bytes"], [],
+                            empty=f"No CR-DMA traffic on '{self.port}'. The CR-DMA probes are not in this trace, so "
+                                  "this is inferred from LLC traffic (turn them on with +rtltrace_CR_DMA_on).",
+                            group=G, order=b + 11, key="CR-DMA · engine (infer)")] + self._warn_section()
         if self.mode == "probe":
-            out.append(Section("CR-DMA · requests per window",
-                               ["kernel", "window", "requests", "engine busy %"],
-                               [[w["kernel"], w["window"], w.get("requests"),
-                                 _r(100 * (w.get("engine_busy") or 0), 3)] for w in self.windows],
-                               "engine busy = share of the window with a request between dma_start and dma_done."))
             by = defaultdict(list)
             for r in self.requests:
                 by[(r["type"], r["ce"])].append(r)
@@ -226,33 +273,81 @@ class DmaMetrics(Plugin):
                 qw = [r["queue_wait"] for r in rs if r["queue_wait"] is not None]
                 ds = [r["done_to_sync"] for r in rs if r["done_to_sync"] is not None]
                 byt = sum(r["bytes"] for r in rs)
+                byt_done = sum(r["bytes"] for r in rs if r["service"] is not None)  # same requests as svc
                 rows.append([typ, "–" if ce is None else f"CE{ce}", len(rs), byt,
                              _r(statistics.mean(r["rows"] for r in rs), 3), _pct(qw, 0.5), _pct(svc, 0.5),
                              _pct(svc, 0.95), max(svc) if svc else None,
-                             _r(byt / sum(svc), 3) if svc and sum(svc) else None, _pct(ds, 0.5)])
-            out.append(Section("CR-DMA · requests by type and CE",
-                               ["type", "CE", "requests", "bytes", "mean rows", "queue wait p50", "service p50",
-                                "service p95", "service max", "B/cycle while serving", "done→sync p50"], rows,
-                               "CE = owner of the scratchpad side (LLC2SPM dst / SPM2LLC src)."))
+                             _r(byt_done / sum(svc), 3) if svc and sum(svc) else None, _pct(ds, 0.5)])
+            out.append(Section("DMA requests by type and CE",
+                               ["type", "CE", "requests", "bytes", "rows per request", "slot wait p50",
+                                "service p50", "service p95", "service max", "B/cycle while serving", "done → sync p50"],
+                               rows, "One row per DMA call type and CE (the CE whose scratchpad is the source or "
+                               "destination). Times in cycles. The time a request waits for the shared engine from "
+                               "the CE's call is in 'Prefetch iterations' (wait for engine).",
+                               legend=V.legend("DMA requests", "slot wait", "service time", "B/cycle while serving",
+                                               "done → sync"),
+                               group=G, order=b + 10, key="CR-DMA · requests by type and CE"))
+        cols = ["kernel", "phase", "cycles", "row Gets", "row Puts", "bytes", "bytes/cycle", "read bytes/cycle",
+                "avg in flight", "active %", "Get → Get gap p50", "Get → Get gap mean", "latency p50", "latency p95"]
+        rows = [[w["kernel"], w["window"], int(w["cycles"]), w["gets"], w["puts"], w["bytes"],
+                 _r(w["bytes_per_cycle"], 3), _r(w["read_bytes_per_cycle"], 3), _r(w["avg_in_flight"], 3),
+                 _r(100 * (w["active"] or 0), 3), w["get_interval_p50"], _r(w["get_interval_mean"], 3),
+                 w["latency_p50"], w["latency_p95"]] for w in self.windows]
+        note = (f"Transactions of requesters matching '{self.client}' on '{self.port}' (no CR-DMA probes in this "
+                "trace)." if self.mode == "infer" else
+                f"The engine's TileLink requests on '{self.mbus}': one Get per row chunk read, one Put per chunk "
+                "written.") + \
+            " A latency-bound engine shows avg in flight near 1 and a Get → Get gap close to the latency."
+        out.append(Section("DMA engine throughput", cols, rows, note,
+                           legend=V.legend("row Gets / Puts", "bytes/cycle", "avg in flight", "active %",
+                                           "Get → Get gap", "latency p50 / p95"),
+                           group=G, order=b + 11, key=f"CR-DMA · engine ({self.mode})"))
+        if self.mode == "probe":
+            out.append(Section("DMA engine busy per phase",
+                               ["kernel", "phase", "requests", "engine busy %"],
+                               [[w["kernel"], w["window"], w.get("requests"),
+                                 _r(100 * (w.get("engine_busy") or 0), 3)] for w in self.windows],
+                               legend=V.legend("engine busy %"), group=G, order=b + 12,
+                               key="CR-DMA · requests per window"))
             if self.gate:
                 tot = sum(self.gate.values()) or 1
-                out.append(Section("CR-DMA · why the next Get waits (dma_gate)", ["reason", "cycles", "%"],
-                                   [[k, round(v), _r(100 * v / tot, 3)] for k, v in self.gate.most_common()]))
+                out.append(Section("Why the DMA engine waits",
+                                   ["reason", "cycles", "% of cycles"],
+                                   [[RtlName(V.DMA_GATE.get(k, str(k)), f"dma_gate = {k}"), round(v),
+                                     _r(100 * v / tot, 3)] for k, v in self.gate.most_common()],
+                                   "Per cycle of the whole trace, the reason the engine issued no request "
+                                   "(probe dma_gate, group CR_DMA_detail). 'waiting for read data from the LLC' "
+                                   "dominating = the engine is latency-bound: more requests in flight or larger "
+                                   "transfers would help.",
+                                   legend=V.legend("DMA wait reason"), group=G, order=b + 13,
+                                   key="CR-DMA · why the next Get waits (dma_gate)"))
         if self.by_section:
-            out.append(Section("CR-DMA · traffic by kernel section", ["kernel", "opcode", "section", "txns", "bytes"],
-                               [[r["kernel"], r["opcode"], r["section"], r["txns"], r["bytes"]]
-                                for r in self.by_section],
-                               "Gets read the section, Puts write it. A section read many times its size means the "
-                               "kernel re-fetches that data."))
+            out.append(Section("DMA traffic by buffer / memory section",
+                               ["kernel", "request", "buffer / section", "row requests", "bytes"],
+                               [[r["kernel"], "read (Get)" if r["opcode"] == "Get" else f"write ({r['opcode']})",
+                                 self.names.section(r["section"]), r["txns"], r["bytes"]] for r in self.by_section],
+                               "A buffer read many times its size means the kernel re-fetches that data.",
+                               group=G, order=b + 14, key="CR-DMA · traffic by kernel section"))
         if self.regions is not None and self.requests:
             by = defaultdict(lambda: [0, 0])
             for r in self.requests:
                 c = by[(r["type"], r["src_section"], r["dst_section"])]
                 c[0] += 1
                 c[1] += r["bytes"]
-            out.append(Section("CR-DMA · requests by source → destination section",
+            out.append(Section("DMA requests: source → destination",
                                ["type", "source", "destination", "requests", "bytes"],
-                               [[t, s, d, n, b] for (t, s, d), (n, b) in sorted(by.items(), key=lambda x: -x[1][1])]))
-        if self.warnings:
-            out.append(Section("CR-DMA · warnings", ["warning"], [[w] for w in self.warnings]))
-        return out
+                               [[t, self.names.section(s), self.names.section(d), n, b_]
+                                for (t, s, d), (n, b_) in sorted(by.items(), key=lambda x: -x[1][1])],
+                               group=G, order=b + 15, key="CR-DMA · requests by source → destination section"))
+        return out + self._warn_section()
+
+    def _warn_section(self) -> list[Section]:
+        if not self.warnings:
+            return []
+        G, b = V.G_CHECK
+        return [Section("Tool warnings · CR-DMA", ["warning"], [[w] for w in self.warnings], group=G, order=b + 12,
+                        key="CR-DMA · warnings")]
+
+
+def _bytes(n) -> str:
+    return f"{n // 1024} KB" if n and n % 1024 == 0 else f"{n} B"

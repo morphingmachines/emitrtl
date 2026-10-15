@@ -3,7 +3,7 @@ annotations."""
 
 from __future__ import annotations
 
-from .plugin import Emit, Label, Plugins
+from .plugin import Emit, Label, Plugins, RtlName
 from .reader import Event, Field, Probe
 
 
@@ -13,16 +13,36 @@ class Labeler:
         self.plugins = plugins
         self.emitted = emitted
         self.regions = regions  # rtltrace.regions.RegionMap or None
+        self._names: dict[tuple[str, str], str | None] = {}
+
+    def display(self, kind: str, rtl: str) -> str | None:
+        """A plugin's friendly name for an RTL identifier (module / client / port / probe / region), or None."""
+        k = (kind, rtl)
+        if k not in self._names:
+            self._names[k] = self.plugins.display(kind, rtl) if self.plugins is not None else None
+        return self._names[k]
+
+    def name(self, kind: str, rtl: str, default: str | None = None) -> RtlName:
+        """Friendly name (default: `default`, else the identifier itself) that keeps the RTL identifier."""
+        return RtlName(self.display(kind, rtl) or default or rtl, rtl)
 
     def region(self, addr: int):
         return self.regions.lookup(addr) if self.regions is not None else None
+
+    def region_label(self, r) -> str:
+        """StackMemory[ce2]+0x1f0, or a plugin's name for the region (e.g. a kernel buffer): W+0x40."""
+        base = r.label().rsplit("+", 1)[0]
+        d = self.display("region", base)
+        return f"{d}+0x{r.offset:x}" if d else r.label()
 
     def addr(self, addr: int) -> tuple[str, str]:
         """(short, long) label of an address: ELF symbol, else region (StackMemory[ce2]+0x1f0), else hex."""
         s = self.sym(addr)
         r = self.region(addr)
-        short = s if not s.startswith("0x") or r is None else r.label()
-        parts = [x for x in (None if s.startswith("0x") else s, r.label() if r else None) if x]
+        rl = self.region_label(r) if r is not None else None
+        short = s if not s.startswith("0x") or r is None else rl
+        parts = [x for x in (None if s.startswith("0x") else s, rl, r.label() if r is not None and rl != r.label()
+                             else None) if x]
         return short, (" · ".join(parts) + f" [0x{addr:x}]") if parts else f"0x{addr:x}"
 
     def sym(self, addr: int) -> str:

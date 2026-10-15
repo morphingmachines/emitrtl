@@ -224,6 +224,7 @@ class Trace:
         self.base_period = 1
         self.t_end = 0
         self.end_ts = 0.0
+        self.start_ts = 0.0  # first DECL (reset) or the --from cycle
 
     # ------------------------------------------------------------------ helpers used by the model and views
     def cycles(self, t: int) -> float:
@@ -253,7 +254,7 @@ def read(paths, catalog: str | Path | None = None, period: int | None = None, st
     tr = Trace()
     cat = load_catalog(catalog) if catalog else {}
     raw: list[tuple[int, str, str, int, str | None]] = []
-    unprocessed = 0
+    unprocessed = bad = 0
     for path in ([paths] if isinstance(paths, (str, Path)) else paths):
         with open(path, errors="replace") as f:
             for line in f:
@@ -266,7 +267,11 @@ def read(paths, catalog: str | Path | None = None, period: int | None = None, st
                 parts = line.rstrip("\n").split(" ")
                 if len(parts) < 5:
                     continue
-                t, kind, inst, pid = int(parts[1]), parts[2], normalize_inst(parts[3]), int(parts[4])
+                try:
+                    t, kind, inst, pid = int(parts[1]), parts[2], normalize_inst(parts[3]), int(parts[4])
+                except ValueError:
+                    bad += 1  # a truncated or interleaved line (e.g. the simulation was killed mid-print)
+                    continue
                 if kind == "DECL":
                     if len(parts) < 12:
                         tr.warnings.append(f"malformed DECL: {line.strip()[:120]}")
@@ -282,6 +287,12 @@ def read(paths, catalog: str | Path | None = None, period: int | None = None, st
                     p.decl_times.append(t)
                 elif kind in ("EVENT", "STALL"):
                     raw.append((t, kind, inst, pid, parts[5] if len(parts) > 5 else None))
+    if bad:
+        tr.warnings.append(f"{bad} malformed @RT line(s) skipped")
+    # several files (or a log that interleaves several simulator processes) need not be in time order; the event
+    # loop below pairs STALL with the next transfer, so it needs time order. The sort is stable: same-time lines keep
+    # their print order.
+    raw.sort(key=lambda r: r[0])
     if unprocessed:
         tr.warnings.append(f"{unprocessed} line(s) were not post-processed (no instance path or time); "
                            "run the emitrtl post-pass (emitrtl.trace.PostPass) on the generated SV")
@@ -355,11 +366,17 @@ def read(paths, catalog: str | Path | None = None, period: int | None = None, st
         if not reset_between(s.probe, s.t, tr.t_end):
             tr.markers.append(Marker(s.probe, "pending", s.ts, tr.probe_cycles(s.probe, tr.t_end - s.t) + 1, s))
 
+    decl_ts = [t / base for p in tr.probes.values() for t in p.decl_times]
+    tr.start_ts = min(decl_ts, default=0.0)
     if t_from is not None or t_to is not None:
+        # cycle N is the half-open interval [N, N+1) on the ts axis (an event in cycle N has ts N+0.5), so --to N
+        # keeps cycle N. The trace end (and with it every percentage over the span) is clipped to the window.
         lo = t_from if t_from is not None else -math.inf
-        hi = t_to if t_to is not None else math.inf
-        tr.events = [e for e in tr.events if lo <= e.ts <= hi]
-        tr.markers = [m for m in tr.markers if lo <= m.t0 <= hi]
+        hi = t_to + 1 if t_to is not None else math.inf
+        tr.events = [e for e in tr.events if lo <= e.ts < hi]
+        tr.markers = [m for m in tr.markers if lo <= m.t0 < hi]
+        tr.end_ts = min(tr.end_ts, hi)
+        tr.start_ts = max(tr.start_ts, lo)
 
     # short module names: drop the common prefix of all instance paths
     insts = sorted({p.inst for p in tr.probes.values()})

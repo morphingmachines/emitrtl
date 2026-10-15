@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""One simulation log -> Perfetto timeline, HTML report, REDEFINE metrics (γe, ρ, φ), CE phases, CR-DMA utilisation
-and cache hit/miss summary.
+"""One simulation log -> kernel performance report (HTML + Markdown + CSV), Perfetto timeline and the JSON summaries
+(REDEFINE metrics γe/ρ/φ, CE code regions, CR-DMA utilisation, cache hit/miss, findings).
 
     <emitrtl>/tools/rtltrace-plugins/redefine_report.py <sim log> [--elf prog.elf] [--launch launch.py] [-o outdir]
 
     e.g. (from sb-cr-sim/build)
-    redefine_report.py trace_cache_metrics_dmamatmul.log \
+    redefine_report.py trace_cache_metrics_dmamatmul.log \\
         --elf ../../mm-baremetal-examples/1CR/dmaMatmul_working/dmaMatmul.elf
 
 Inputs that are not given are discovered:
-  --launch   launch.py next to the ELF (gives D_i/D_o and the declared T_ops; without it γe has no T_ops)
+  --launch   launch.py next to the ELF (gives D_i/D_o, buffer names and the declared T_ops; without it γe has no T_ops)
   --elf      the *.elf next to launch.py
   --config   the RTL config dir (parameters.md + trace_points.json): generated_sv_dir/<config>/ found by walking up
              from the log; when several configs exist the one matching the testbench (sb-cr-sim -> SimCR) is used
+  buffers    rtl_sim_results/buffers.txt next to launch.py / the ELF (buffer addresses -> buffer names in the report)
 
 Writes into outdir (default <log stem>_reports/ next to the log):
-  <stem>.perfetto.json   open in https://ui.perfetto.dev
-  <stem>.html, csv/      rtltrace report: the generic analyses plus every plugin section (all tables as CSV too)
-  <stem>.metrics.json    γe/ρ/φ, sub-windows, waterfall     <stem>.cache.json   cache hit/miss summary
-  <stem>.phases.json     CE time by PC-marker region         <stem>.dma.json     CR-DMA utilisation
-  <stem>.summary.md      the main tables (metrics, waterfall, phases, CR-DMA, cache, kernel sections), warnings
+  <stem>.summary.md        the report body as Markdown (findings, efficiency, CE time, code regions, DMA, caches,
+                           glossary) -- start here
+  <stem>.html, csv/        the same plus the hardware-detail appendix and the RTL name map (every table as CSV too;
+                           friendly-name columns get a '<column> (RTL)' column with the RTL identifier)
+  <stem>.perfetto.json     kernel view for https://ui.perfetto.dev: CE code regions, CR-DMA requests, kernel overview,
+                           counters, correctness checks, CE states (--perfetto-full adds <stem>.perfetto_full.json
+                           with every probe)
+  <stem>.findings.json     ranked findings          <stem>.metrics.json   γe/ρ/φ, sub-windows, waterfall
+  <stem>.phases.json       CE time by PC region     <stem>.dma.json       CR-DMA utilisation
+  <stem>.cache.json        cache hit/miss, hazards  <stem>.overlap.json   compute / DMA overlap
 
 PC-marker names come from *pc_markers*.h next to launch.py / the ELF and the SDK runtime header (or --arg
 markers=a.h,b.h). Without the RTL ce_marker probe, markers are read from the commit lines of the log.
@@ -36,22 +42,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from metrics_sweep import CACHE_PLUGIN, DMA_PLUGIN, PHASES_PLUGIN, PLUGIN, find_rtltrace, fmt  # noqa: E402
+from metrics_sweep import CACHE_PLUGIN, DMA_PLUGIN, PHASES_PLUGIN, PLUGIN, find_rtltrace  # noqa: E402
 
 TESTBENCH_TOPS = {"sb-cr-sim": "SimCR", "sb-redefineip-sim": "SimRedefineIP", "sb-tinyredefineip-sim": "TinyRedefineIP",
                   "sb-fabric-sim": "Fabric"}
-METRIC_COLS = ["kernel", "T_ops", "N_CE", "C_i", "C_o", "t_i_us", "gamma_e", "D_i", "D_o", "D_D_in", "D_D_out", "D_D",
-               "rho", "M_i", "phi"]
-LLC_COLS = ["cache", "accesses", "hits", "misses", "read_misses", "write_misses", "dirty_victim", "hit_ratio"]
-L1D_COLS = ["cache", "accesses", "hits", "misses", "read_misses", "write_misses", "secondary", "hit_ratio", "mpki"]
-SPM_COLS = ["cache", "loads", "stores", "dma_write_bytes", "dma_read_bytes", "dma_beat_latency_p50",
-            "ce_blocked_cycles", "dma_wait_cycles", "s3_overlap"]
-SUB_COLS = ["name", "from", "to", "cycles", "pct", "mean_active_ces", "flops", "local_gamma_e"]
-WF_COLS = ["step", "ce_cycles", "pct", "gamma_e_if_removed"]
-PHASE_COLS = ["region", "cycles", "pct", "busy", "suspended", "idle", "instret", "ipc", "flops_per_cycle", "class"]
-DMA_COLS = ["window", "cycles", "txns", "gets", "puts", "bytes", "bytes_per_cycle", "read_bytes_per_cycle",
-            "avg_in_flight", "active",
-            "get_interval_p50", "latency_p50"]
+VIEW_PLUGIN = HERE / "redefine_view.py"
+OVERLAP_PLUGIN = HERE / "overlap_metrics.py"
 
 
 def find_config(log: Path) -> Path | None:
@@ -69,53 +65,6 @@ def find_config(log: Path) -> Path | None:
     return None
 
 
-def table(rows: list[dict], cols: list[str]) -> list[str]:
-    if not rows:
-        return ["(none)"]
-    return ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)] + \
-           ["| " + " | ".join(fmt(r.get(c)) for c in cols) + " |" for r in rows]
-
-
-def summary_md(metrics: dict | None, cache: dict | None, phases: dict | None = None, dma: dict | None = None) -> str:
-    out = []
-    if metrics:
-        out += ["## REDEFINE metrics (per kernel window)", ""] + table(metrics["kernels"], METRIC_COLS) + [""]
-        for k in metrics["kernels"]:
-            subs = k.get("sub_windows", []) + [{"name": f"CMU {c['op']}", "from": c["from"], "to": c["to"],
-                                                "cycles": c["cycles"], "pct": 100 * c["cycles"] / k["C_o"]}
-                                               for c in k.get("cmu", [])]
-            out += [f"## Sub-windows — `{k['kernel']}`", ""] + table(subs, SUB_COLS) + [""]
-            if k.get("waterfall"):
-                out += [f"## γe waterfall — `{k['kernel']}` (CE-cycles = N_CE x Co)", ""] + \
-                       table(k["waterfall"], WF_COLS) + [""]
-            if k.get("regions") and k.get("D_D_data") is not None:
-                out += [f"## D_D by kernel section — `{k['kernel']}` (data sections: {fmt(k['D_D_data'])} of "
-                        f"{fmt(k['D_D'])} B)", ""] + table(k["regions"], ["region", "dir", "bytes"]) + [""]
-    if phases and phases.get("source"):
-        rows = sorted((r for r in phases["rows"] if r["ce"] == "all"), key=lambda r: (r["kernel"], -r["cycles"]))
-        out += [f"## CE phases — all CEs (source: {phases['source']})", ""] + table(rows, ["kernel"] + PHASE_COLS) + [""]
-    if dma:
-        out += [f"## CR-DMA ({dma['mode']})", ""] + table(dma["windows"], ["kernel"] + DMA_COLS) + [""]
-        if dma.get("by_section"):
-            out += ["CR-DMA traffic by kernel section:", ""] + \
-                   table(dma["by_section"], ["kernel", "opcode", "section", "txns", "bytes"]) + [""]
-    if cache:
-        for w in cache["windows"]:
-            span = f"cycles {w['from']}..{w['to']}" if w.get("from") is not None else ""
-            out += [f"## Cache — window `{w['window']}` {span} (mode: {cache['mode']})", "", "LLC:", ""]
-            out += table(w["llc"], LLC_COLS) + ["", "L1-D:", ""] + table(w["l1d"], L1D_COLS) + [""]
-            if w.get("spm"):
-                out += ["Scratchpad:", ""] + table(w["spm"], SPM_COLS) + [""]
-            for key, name in (("llc_by_section", "LLC"), ("l1d_by_section", "L1-D")):
-                if w.get(key):
-                    out += [f"{name} by kernel section:", ""] + \
-                           table(w[key], ["section", "accesses", "hits", "misses", "miss_ratio"]) + [""]
-    warnings = list(dict.fromkeys(w for x in (metrics, cache, phases, dma) for w in (x or {}).get("warnings", [])))
-    if warnings:
-        out += ["## Warnings", ""] + [f"- {w}" for w in warnings] + [""]
-    return "\n".join(out)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("log", help="captured simulation log (stdout+stderr with the @RT lines)")
@@ -131,6 +80,9 @@ def main() -> int:
     ap.add_argument("--to", dest="t_to", help="last cycle to keep (perfetto/report)")
     ap.add_argument("--tl-hops", action="store_true", help="link TileLink transactions across ports in Perfetto")
     ap.add_argument("--no-perfetto", action="store_true", help="skip the Perfetto timeline")
+    ap.add_argument("--perfetto-full", action="store_true",
+                    help="also write <stem>.perfetto_full.json with every probe (large; for hardware debug)")
+    ap.add_argument("--title", help="report title (default: 'Kernel performance report — <kernels>')")
     ap.add_argument("--no-report", action="store_true", help="skip the HTML report (metrics JSON is still written)")
     a = ap.parse_args()
 
@@ -155,20 +107,28 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     metrics_json, cache_json = out / f"{stem}.metrics.json", out / f"{stem}.cache.json"
     phases_json, dma_json = out / f"{stem}.phases.json", out / f"{stem}.dma.json"
+    findings_json = out / f"{stem}.findings.json"
+    overlap_json = out / f"{stem}.overlap.json"
 
     print(f"log     {log}\nelf     {elf or '-'}\nlaunch  {launch or '- (no D_i/D_o, no declared T_ops)'}\n"
           f"config  {config or '- (no parameters.md / trace_points.json)'}\nout     {out}")
 
-    pargs = {"log": log, "json": metrics_json, "cache_json": cache_json, "phases_json": phases_json,
-             "dma_json": dma_json}
+    pargs = {"log": log}
+    # the JSON summaries are written by one run only: the runs go in parallel and would write the same files
+    jargs = {"json": metrics_json, "cache_json": cache_json, "phases_json": phases_json, "dma_json": dma_json,
+             "findings_json": findings_json, "overlap_json": overlap_json}
     if launch:
         pargs["launch"] = launch
     if elf:
         pargs["elf"] = elf
     if config and (config / "parameters.md").is_file():
         pargs["params"] = config / "parameters.md"
+    bad = [kv for kv in a.arg if "=" not in kv]
+    if bad:
+        sys.exit(f"--arg expects key=value, got {bad[0]!r}")
     pargs.update(kv.split("=", 1) for kv in a.arg)
-    common = [str(log)] + [x for p in (PLUGIN, PHASES_PLUGIN, DMA_PLUGIN, CACHE_PLUGIN) for x in ("--plugin", str(p))]
+    common = [str(log)] + [x for p in (PLUGIN, PHASES_PLUGIN, DMA_PLUGIN, OVERLAP_PLUGIN, CACHE_PLUGIN, VIEW_PLUGIN)
+                           for x in ("--plugin", str(p))]
     common += [x for k, v in pargs.items() for x in ("--plugin-arg", f"{k}={v}")]
     if elf:
         common += ["--elf", str(elf)]
@@ -181,14 +141,31 @@ def main() -> int:
         if v:
             common += [flag, v]
 
+    title = a.title
+    if not title:
+        try:
+            from redefine_common import load_workload
+            names = [k.name for k in load_workload(str(launch))] if launch else []
+        except Exception:  # noqa: BLE001 - the title is cosmetic
+            names = []
+        title = "Kernel performance report" + (f" — {', '.join(names)}" if names else f" — {stem}")
     cmds = {}
     if not a.no_report:
-        cmds["report"] = ["report"] + common + ["-o", str(out / f"{stem}.html"), "--csv", str(out / "csv")]
+        cmds["report"] = ["report"] + common + ["-o", str(out / f"{stem}.html"), "--csv", str(out / "csv"),
+                                                "--md", str(out / f"{stem}.summary.md"), "--title", title]
     if not a.no_perfetto:
-        cmds["perfetto"] = ["perfetto"] + common + (["--tl-hops"] if a.tl_hops else []) + \
-                           ["-o", str(out / f"{stem}.perfetto.json")]
-    if not cmds:  # metrics only: a report run is the cheapest way to drive the plugins
-        cmds["report"] = ["report"] + common + ["-o", str(out / f"{stem}.html")]
+        hops = ["--tl-hops"] if a.tl_hops else []
+        cmds["perfetto"] = ["perfetto"] + common + hops + ["--view", "kernel", "-o", str(out / f"{stem}.perfetto.json")]
+        if a.perfetto_full:
+            cmds["perfetto-full"] = ["perfetto"] + common + hops + ["--view", "full", "-o",
+                                                                    str(out / f"{stem}.perfetto_full.json")]
+    if "report" not in cmds:
+        # the findings JSON is written by the report step (redefine_view.report), so a JSON-writing run is always a
+        # report run, even with --no-report (its HTML goes to a scratch name and is removed afterwards)
+        cmds["report"] = ["report"] + common + ["-o", str(out / f".{stem}.metrics_only.html"), "--title", title]
+    cmds["report"] += [x for k, v in jargs.items() for x in ("--plugin-arg", f"{k}={v}")]
+    for f in jargs.values():  # never list or print a summary left over from an earlier run
+        f.unlink(missing_ok=True)
 
     print(f"regions {regions}\n")
     rt = find_rtltrace(a.rtltrace)
@@ -201,19 +178,28 @@ def main() -> int:
         if p.returncode:
             failed = True
             print(f"[{name}] FAILED (exit {p.returncode})\n{p.stdout}{p.stderr}", file=sys.stderr)
+        elif "[rtltrace] plugin '" in p.stderr:
+            # rtltrace disables a failing plugin and carries on: say so, the report is missing that part
+            print(f"[{name}] a plugin failed or was skipped; its tables and JSON are missing:\n{p.stderr}",
+                  file=sys.stderr)
+    scratch = out / f".{stem}.metrics_only.html"
+    scratch.unlink(missing_ok=True)
     if failed:
         return 1
 
-    metrics, cache, phases, dma = (json.loads(f.read_text()) if f.is_file() else None
-                                   for f in (metrics_json, cache_json, phases_json, dma_json))
-    md = summary_md(metrics, cache, phases, dma)
-    (out / f"{stem}.summary.md").write_text(md)
-    print(md)
+    found = json.loads(findings_json.read_text()) if findings_json.is_file() else []
+    if found:
+        print("findings (most important first):")
+        for i, f in enumerate(found, 1):
+            print(f"  {i}. [{f['severity']}] {f['title']}")
+        print()
     print("written:")
     for f in sorted(out.iterdir()):
         print(f"  {f}")
+    if not a.no_report:
+        print(f"\nstart with {out / f'{stem}.summary.md'} (or the .html: same content plus hardware detail)")
     if not a.no_perfetto:
-        print("\nopen the .perfetto.json in https://ui.perfetto.dev (Open trace file)")
+        print("open the .perfetto.json in https://ui.perfetto.dev (Open trace file)")
     return 0
 
 

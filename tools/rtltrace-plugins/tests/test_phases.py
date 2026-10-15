@@ -243,6 +243,22 @@ class PhasePlugins(unittest.TestCase):
                          ("LLC2SPM", 128, 2, 5, 80))
         self.assertEqual((r["src_section"], r["dst_section"]), (None, None))  # no regions in this run
 
+    def test_dma_probes_on_but_no_request(self):
+        # the CR-DMA probes are declared (group on) but the kernel moves no data: say so, without a warning
+        lines = [ce(0, 1, IDLE), ce(0, 100, BUSY), ce(0, 400, IDLE)]
+        s = self.trace(lines, decls=[CE_DECL.format(i=0)] + DMA_DECLS, plugins=("dma_metrics.py",))
+        dm = json.loads((self.d / "d.json").read_text())
+        self.assertEqual((dm["mode"], dm["requests"], dm["warnings"]), ("probe", [], []))
+        (sec,) = s.plugins.report(s.model)
+        self.assertEqual(sec.rows, [])
+        self.assertIn("does not use the CR-DMA", sec.empty)
+        # waterfall without T_ops or markers: CE time is still split
+        s = self.trace(lines, decls=[CE_DECL.format(i=0)], t_ops="")
+        k = json.loads((self.d / "m.json").read_text())["kernels"][0]
+        self.assertEqual([(w["step"], w["ce_cycles"]) for w in k["waterfall"]],
+                         [("CEs idle / launching", 0), ("CEs suspended (waiting on DMA, sync, ...)", 0),
+                          ("busy, not split", k["C_o"])])  # one CE, busy for the whole window
+
 
 if __name__ == "__main__":
     unittest.main()

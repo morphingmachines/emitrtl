@@ -88,13 +88,19 @@ def run_one(rt: Path, name: str, launch: Path, log: Path, a) -> tuple[str, dict 
     cmds = [[sys.executable, "-m", "rtltrace", "report"] + common + ["-o", str(out / f"{name}.html")]]
     if a.perfetto:
         cmds.append([sys.executable, "-m", "rtltrace", "perfetto"] + common + ["-o", str(out / f"{name}.perfetto.json")])
+    for k in ("json", "phases_json", "dma_json", "cache_json"):  # no stale summary from an earlier sweep
+        if k in pargs:
+            Path(pargs[k]).unlink(missing_ok=True)
     msgs = []
     for cmd in cmds:
         p = subprocess.run(cmd, cwd=rt, capture_output=True, text=True)
         msgs.append(p.stdout + p.stderr)
         if p.returncode:
             return name, None, "".join(msgs)
-    summary = json.loads((out / f"{name}.json").read_text())
+    mj = out / f"{name}.json"
+    if not mj.is_file():  # the metrics plugin was skipped or failed: report this run, keep the sweep going
+        return name, None, "".join(msgs) + f"\nno {mj.name}: the REDEFINE metrics plugin did not run"
+    summary = json.loads(mj.read_text())
     for key, f in (("cache", out / f"{name}.cache.json"), ("phases", out / f"{name}.phases.json"),
                    ("dma", out / f"{name}.dma.json")):
         if f.is_file():
@@ -109,7 +115,8 @@ def analysis_columns(summary: dict, k: dict) -> dict:
     steady = subs.get("steady") or subs.get("whole")
     if steady:
         row["steady_gamma_e"] = steady.get("local_gamma_e")
-    losses = [w for w in k.get("waterfall", []) if not w["step"].startswith("ideal")]
+    losses = [w for w in k.get("waterfall", [])
+              if not w["step"].startswith("ideal") and "not split" not in w["step"]]  # rows that are losses
     if losses:
         top = max(losses, key=lambda w: w["ce_cycles"])
         row.update(top_loss=top["step"], top_loss_pct=top["pct"])

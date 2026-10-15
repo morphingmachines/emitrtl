@@ -68,20 +68,34 @@ The simulated RTL must be built with the probes: `trace_points.json` and `kernel
 
 ### One workload, everything in one go
 
-`redefine_report.py` takes a sim log, plus optionally the ELF and/or `launch.py`, runs all four plugins in one
-`rtltrace report` and one `rtltrace perfetto` (in parallel), and writes into `-o <dir>` (default
-`<log stem>_reports/` next to the log):
+`redefine_report.py` takes a sim log, plus optionally the ELF and/or `launch.py`, runs the four metric plugins and
+the overlap plugin (`overlap_metrics.py`) and the view plugin (`redefine_view.py`) in one `rtltrace report` and one `rtltrace perfetto` (in parallel), and writes
+into `-o <dir>` (default `<log stem>_reports/` next to the log):
 
 | File | Contents |
 |---|---|
-| `<stem>.perfetto.json` | Timeline; open in https://ui.perfetto.dev |
-| `<stem>.html` | Generic rtltrace analyses plus every plugin section |
-| `csv/` | Every table of the HTML report as CSV |
+| `<stem>.summary.md` | **Start here.** The report body as Markdown, in debug-playbook order (below) |
+| `<stem>.html` | The same with a table of contents, tooltips (RTL names) and the hardware-detail appendix + RTL name map |
+| `csv/` | Every table as CSV; friendly-name columns get a `<column> (RTL)` column with the RTL identifier |
+| `<stem>.perfetto.json` | Kernel view for https://ui.perfetto.dev: kernel overview, CE code regions, CR-DMA requests, cache hit rates, correctness checks, CE states (a few MB) |
+| `<stem>.perfetto_full.json` | With `--perfetto-full`: every probe, for hardware debug (≈ 340 MB for dmaMatmul with every group on; the kernel view is ≈ 6 MB) |
+| `<stem>.findings.json` | Ranked findings (also printed) |
 | `<stem>.metrics.json` | γe/ρ/φ, sub-windows, CMU spans, waterfall, D_D by section |
 | `<stem>.phases.json` | CE time by PC-marker region |
-| `<stem>.dma.json` | CR-DMA windows, per-request records, traffic by section, gate histogram |
-| `<stem>.cache.json` | LLC / L1-D / scratchpad tables, hit/miss by section |
-| `<stem>.summary.md` | The main tables and all warnings (also printed) |
+| `<stem>.dma.json` | CR-DMA windows, per-request records, traffic by section, gate histogram, `issues` (`dma_overflow` / `dma_error` events: correctness findings) |
+| `<stem>.cache.json` | LLC / L1-D / scratchpad tables, hit/miss by section, hazard issues |
+| `<stem>.overlap.json` | Compute / DMA overlap per CE, prefetch iterations, engine demand vs capacity, buffer safety |
+
+The report is ordered the way a kernel developer debugs: **1 Findings** (correctness first, then the biggest losses
+of CE time, each with evidence, a suggestion and the RTL probes it rests on) → **2 Efficiency** (γe, ρ, φ, traffic by
+buffer, who drives LLC traffic) → **3 Where the CE time went** (γe waterfall, CE state per CE, setup/steady/tail) →
+**4 Code regions** (PC_MARK regions with IPC, flops/cycle and what limits them) → **5 Data movement** (CR-DMA requests,
+throughput, why the engine waits) → **6 Memory hierarchy** (LLC by buffer and requester, L1-D, scratchpad sharing) →
+**7 Checks and tool warnings** → appendices (glossary, probe groups in this run, hardware detail, RTL name map).
+Names come from `redefine_vocab.py` (one place for every label and glossary entry): `CE2 L1-D / scratchpad`
+instead of `baseCr.core_2.rockettile.dcache`, `runtime · DMA LLC→SPM call` instead of `rt.DMA_LLC2SPM`, buffer names
+from `launch.py` (`W (in, 64 KB)`) instead of `GlobalDataLow[r33]` (addresses from `rtl_sim_results/buffers.txt`, or
+`--arg buffers=<file>`). Every friendly name keeps its RTL identifier (tooltip, CSV column, name map, Perfetto args).
 
 Inputs that are not given are discovered:
 - `launch.py` and the ELF are found from each other;
@@ -97,9 +111,9 @@ Inputs that are not given are discovered:
     [--config <repo>/generated_sv_dir/redefine.cr.sim.SimCR.DemoCRConfig] [-o <dir>]
 ```
 
-Other options: `--arg key=value` (any plugin arg, e.g. `t_ops=`, `from=`, `markers=`), `--from/--to` (cycle range for
-the timeline and report), `--tl-hops`, `--no-perfetto` (much faster; the Perfetto file is ≈ 240 MB for dmaMatmul with
-every probe group on), `--no-report`, `--regions none`, `--rtltrace <dir>`.
+Other options: `--arg key=value` (any plugin arg, e.g. `t_ops=`, `from=`, `markers=`, `buffers=`), `--from/--to`
+(cycle range for the timeline and report), `--tl-hops`, `--perfetto-full`, `--no-perfetto`, `--no-report`,
+`--title`, `--regions none`, `--rtltrace <dir>`.
 
 ### One workload, by hand
 
@@ -113,8 +127,10 @@ python3 -m rtltrace report <sim.log> -o report.html \
     --plugin-arg json=metrics.json
 ```
 
-Add `--plugin <this dir>/ce_phases.py --plugin <this dir>/dma_metrics.py --plugin <this dir>/cache_metrics.py`
-(and `--regions`, `--catalog`, `--elf`) for the rest; this is what `redefine_report.py` does.
+Add `--plugin <this dir>/ce_phases.py --plugin <this dir>/dma_metrics.py --plugin <this dir>/overlap_metrics.py
+--plugin <this dir>/cache_metrics.py --plugin <this dir>/redefine_view.py` (in this order: overlap_metrics needs
+ce_phases and dma_metrics, redefine_view goes last) and `--regions`, `--catalog`, `--elf` for the rest; this is what
+`redefine_report.py` does.
 
 `python3 -m rtltrace perfetto ...` with the same plugin args adds these processes to the Perfetto trace:
 - **REDEFINE metrics:** a `kernel window` slice carrying every metric, `sub-windows` (setup / steady / tail) and
@@ -153,7 +169,7 @@ rtltrace is found through `--rtltrace`, `$RTLTRACE_DIR`, or the `rtltrace` direc
 |---|---|
 | `launch` | `launch.py`, or a `launches-*.json` kept by `build.py` |
 | `params` | `parameters.md` of the simulated RTL config |
-| `log` | Raw sim log. Its `C<n>:` commit lines (when the testbench prints them) cross-check T_ops and are the fallback source of PC markers. |
+| `log` | Raw sim log. Decoded commit lines (spike-dasm output, `… inst=[..] fmadd.s …`), when present, cross-check T_ops and are the fallback source of PC markers. Raw `DASM(…)` commit lines are not decoded and are ignored (the `ce_marker` counters are used instead). |
 | `elf`, `markers` | Where to look for `*pc_markers*.h` / an explicit list of marker headers (`a.h,b.h`) |
 | `regions` | `kernel_sections.json` when rtltrace was not given `--regions` |
 | `json` | Write the metrics summary here |
@@ -187,6 +203,12 @@ Besides the metric tables, the report contains:
 
 **Multiple kernels.** With several `LAUNCHES`, the CE activity is split into one window per kernel at the longest all-Idle gaps.
 
+**Any kernel.** The report is generated, not written for a kernel: every run gets the same chapters, filled with
+what its trace contains. Missing inputs leave a section empty with a sentence saying why, and the findings name
+them: no `t_ops` in `launch.py` (no γe; the waterfall still splits the CE time, with the possibly useful busy time
+as one row), no PC markers (no code regions or compute / DMA overlap), a kernel that does not use the CR-DMA
+("no CR-DMA requests in this run").
+
 ## Cache metrics
 
 rtltrace knows nothing about caches, and a `Trace.tl` tap only sees the traffic crossing a cache's boundary, not the
@@ -217,12 +239,12 @@ For each kernel window and for the whole run (`run`):
 
 - **LLC:** accesses, hits, misses, hit and miss %, read and write misses, `merged`, dirty-victim and fetch-modify
   misses, refills and writebacks, and CMU operations. A request that waited in an MSHR's RPQ behind a miss to the same
-  line is counted as a hit and also as `merged`.
+  line is counted as `merged` (every replay-queue lookup, hit or miss) and also as a hit or a miss.
 - **LLC by requester:** the TileLink source is mapped to the `LLC_in` client (Core N ICache/DCache, CR-DMA, the
   orchestrator caches).
-- **L1-D per CE:** the same counts, plus secondary misses (merged into an in-flight MSHR) and MPKI. MPKI is only given
-  for the `run` window, because the retired-instruction count covers the whole log, and only when the log has commit
-  lines.
+- **L1-D per CE:** the same counts, plus secondary misses (merged into an in-flight MSHR) and MPKI. MPKI uses the CE's
+  `ce_marker` instret counter over the same window (decoded commit lines, when the log has them, for the `run`
+  window).
 - **Scratchpad per CE** (`l1d_spm` probes): CE loads and stores, bytes the CR-DMA wrote into / read from the
   scratchpad (`SPM_in`), DMA beat latency, cycles the CE was blocked by a DMA beat and the DMA waited for the CE, and
   `spm_s3_overlap` events.
@@ -236,7 +258,7 @@ The plugin warns when any of these fail:
 - LLC_out Gets outside CMU periods ≠ MSHR refills.
 - Writebacks ≠ dirty-victim misses.
 
-On fib all three hold exactly. For the L1-D, compare its primary read misses with the "D$ Gets at LLC" column.
+On fib all three hold exactly. For the L1-D, compare its primary read misses with the "L1-D refills at LLC" column.
 
 ### Without the probes (`mode=infer`)
 
@@ -294,16 +316,18 @@ runtime header `CwithHyperOps/include/redefine_pc_markers.h` (`RE_PCM_FOO` is sh
 The stack of open regions survives a suspend/resume and is cleared when the CE goes Idle or starts a new hyperOp.
 Busy time outside any region is `untagged`; suspended time outside any region is `suspended`.
 
-Per region: cycles split by CeState, instructions, IPC and flops per busy cycle, and a class: **waiting** (> 50%
-suspended or idle, or IPC < 0.05), **stall-bound** (IPC < 0.6), **instruction-bound** (retiring well, < 60% of peak
-flops), **compute-bound**. Perfetto gets a "CE phases" process (one track per CE) and per-CE IPC and flops/cycle
+Per region: cycles split by CeState, instructions, IPC and flops per busy cycle, and what it is **limited by** (checked
+in this order): **waiting** (> 50 % suspended or idle), **blocked in hardware** (busy but IPC < 0.05: a flush, fence
+or blocking access), **stall-limited** (IPC < 0.6), **control / data-movement code** (no FP work),
+**instruction-limited** (retiring well, < 60 % of peak flops), **compute-bound**. The JSON keeps the older `class`
+key (waiting / stall-bound / instruction-bound / compute-bound) next to `limited_by`. Perfetto gets a "CE phases" process (one track per CE) and per-CE IPC and flops/cycle
 counters.
 
 | Arg | Meaning |
 |---|---|
 | `markers`, `elf`, `launch`, `log` | Marker headers / where to find them; kernel names; commit-log fallback |
 | `macs_per_ce` | Peak is 2 × this flops/cycle (default 1) |
-| `wait`, `idle_ipc`, `stall_ipc`, `compute` | Class thresholds (defaults 0.5, 0.05, 0.6, 0.6) |
+| `wait`, `idle_ipc`, `stall_ipc`, `compute_frac` | Class thresholds (defaults 0.5, 0.05, 0.6, 0.6). `compute=` is the compute-region list |
 | `phases_json` | Write the phase table here |
 
 ### CR-DMA (`dma_metrics.py`)
@@ -327,6 +351,39 @@ traffic by kernel section, and requests by source → destination section.
 | `spm_base`, `spm_stride` | Scratchpad window used to find a request's CE (default `0x30000000`, `0x2000`) |
 | `bin` | Cycles per bytes/cycle counter sample (default 1000) |
 | `dma_json` | Write the CR-DMA summary here |
+
+### Compute / DMA overlap (`overlap_metrics.py`)
+
+Answers, for any kernel that moves data with the CR-DMA: is the data movement overlapped with compute, is the
+overlap enough, and is it safe? No kernel-specific knowledge and no extra probes:
+
+- **Compute** = the PC-marker regions that retire FP work (≥ 0.1 flops per busy cycle, or `compute=<regions>`).
+- **Issue time** = the end of the runtime's DMA call (`rt.DMA_LLC2SPM` / `rt.DMA_SPM2LLC` / `rt.DMA_LLC2LLC`
+  markers from `redefine_pc_markers.h`), matched in order to the CR-DMA requests whose scratchpad side is that CE
+  (the match is validated; otherwise `dma_queued` is used and a warning says so). `dma_queued` alone would miss most
+  of the wait: the engine holds one request in its "next" slot; other CEs' requests queue in the Orchestrator.
+- **Per CE**: DMA in flight (issue → last write acknowledged), overlapped with compute, DMA hidden %, compute with
+  DMA underneath %, exposed DMA (and how much of it the CE spent suspended).
+- **Prefetch iterations** (a compute region + the requests issued just before it): data ready before the compute
+  ended %, issue → data arrived split into wait for engine (and how many other CEs' requests were ahead) and transfer,
+  exposed wait, wake-up latency.
+- **Can the shared CR-DMA keep up?** Bytes/cycle the CEs need (prefetched bytes ÷ compute cycles, summed over CEs)
+  vs bytes/cycle the engine delivers while transferring. Above 1, no prefetch depth can hide the transfers.
+- **Is it safe?** (needs `+rtltrace_l1d_spm_on`): CE loads from a buffer a DMA is still filling, CE stores into a
+  buffer a DMA is still sending, and `spm_s3_overlap` events split into "same buffer" (kernel race) and "another
+  buffer" (hardware hazard).
+- Perfetto: a `CE ↔ DMA overlap` process with each CE's requests as "waiting for engine" + "transfer" spans, to
+  line up with the CE code regions.
+
+How each number is computed, a worked dmaMatmul iteration and the cross-check:
+[docs/compute_dma_overlap.md](docs/compute_dma_overlap.md). `python3 overlap_xcheck.py <out>/<stem>` recomputes
+the overlap from the Perfetto JSON alone (kernel-view tracks, and raw probes with `--perfetto-full`) and compares
+it with `<stem>.overlap.json`.
+
+dmaMatmul: transfers run under 98 % of the compute and no buffer is touched while in flight, but each request waits
+~1,950 cycles behind two other CEs' requests and transfers in 712, against 2,047 cycles of compute: the data is
+ready in time in 1 % of iterations and each iteration waits ~650 cycles. The four CEs need 2.07 B/cycle and the
+engine delivers 1.42 (1.46×), so the fix is more work per transferred byte, not deeper prefetch.
 
 ### Scratchpad probes (group `l1d_spm`, off by default)
 
@@ -354,8 +411,8 @@ traffic by section, and section names on Perfetto TileLink slices.
 | `l1d_spm`, `CR_DMA_detail` | off | scratchpad accesses and DMA beats, DMA gate reason |
 | `ce` | off | CeIfc port probes |
 
-For dmaMatmul (≈ 550k cycles) the log is ≈ 180 MB (1.75M lines) with everything above on, and the Perfetto file
-≈ 240 MB. The largest single probes are `spm_access` (≈ 290k events, group `l1d_spm`) and `dma_gate` (≈ 100k,
+For dmaMatmul (≈ 550k cycles) the log is ≈ 180 MB (1.75M lines) with everything above on, the full Perfetto file
+(`--perfetto-full`) ≈ 340 MB and the kernel view ≈ 6 MB. The largest single probes are `spm_access` (≈ 290k events, group `l1d_spm`) and `dma_gate` (≈ 100k,
 `CR_DMA_detail`); leave those groups off unless you are looking at scratchpad conflicts or CR-DMA stalls.
 
 ```sh

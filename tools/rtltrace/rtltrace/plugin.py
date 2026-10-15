@@ -14,6 +14,8 @@ A plugin is a Python file (versioned with the system it describes) defining a su
         def annotate(self, f, value, ev): ...    # -> (short, long) label or None
         def derive(self, model, out): ...        # add processes, tracks, spans, instants, counters, flows, links
         def report(self, model): ...             # -> [Section, ...] for the HTML/text report
+        def display(self, kind, name): ...       # friendly name for an RTL identifier (module/client/port/probe/region)
+        def card(self): ...                      # {label: value} for the report header (run card)
 
 Load with `rtltrace <cmd> ... --plugin path/to/file.py[:ClassName] [--plugin-arg key=value ...]`.
 Plugins read the model; they never modify it. Everything they emit is tagged `plugin:<name>`.
@@ -30,6 +32,19 @@ from pathlib import Path
 from typing import Any
 
 Label = tuple[str, str]  # (short, long)
+HW_GROUP = "Appendix · Hardware detail"  # report chapter of the generic analyses once plugins order the report
+
+
+class RtlName(str):
+    """A display name that remembers the RTL identifier it stands for. Views show the name and keep the identifier
+    reachable: an HTML tooltip (inline in hardware-detail tables) and an extra '<column> (RTL)' CSV column."""
+
+    rtl: str
+
+    def __new__(cls, text: str, rtl: str = ""):
+        s = super().__new__(cls, text)
+        s.rtl = rtl
+        return s
 
 
 @dataclass
@@ -38,6 +53,12 @@ class Section:
     columns: list[str] = field(default_factory=list)
     rows: list[list[Any]] = field(default_factory=list)
     text: str = ""
+    legend: dict[str, str] = field(default_factory=dict)  # column (or term) -> meaning, shown under the table
+    group: str = ""  # report chapter
+    order: float | None = None  # position in the report (lower first); None = after the generic tables
+    level: str = "app"  # "app": report body; "hw": hardware detail (RTL names shown inline, left out of --md)
+    key: str = ""  # stable CSV file name (default: derived from the title)
+    empty: str = ""  # shown instead of the table when there are no rows (default "Nothing to show.")
 
 
 @dataclass
@@ -53,6 +74,7 @@ class Plugin:
     requires: list[str] = []
     fields: dict[str, str] = {}
     tags: set[str] = set()
+    perfetto_keep: list[str] = []  # probe-name globs of module tracks kept in the Perfetto kernel view
 
     def setup(self, ctx: Context) -> None:
         pass
@@ -65,6 +87,15 @@ class Plugin:
 
     def report(self, model) -> list[Section]:
         return []
+
+    def display(self, kind: str, name: str) -> str | None:
+        """Friendly name of an RTL identifier, or None. kind: module (instance path), client (TileLink client name),
+        port (TileLink port name), probe (probe name), region (address-region label without offset)."""
+        return None
+
+    def card(self) -> dict[str, str]:
+        """Entries for the report header (run card)."""
+        return {}
 
 
 @dataclass
@@ -158,6 +189,10 @@ def load(spec: str) -> Plugin:
     if cls:
         return getattr(mod, cls)()
     for v in vars(mod).values():
+        # a class defined in the file itself, not a Plugin subclass it imported from a shared helper module
+        if isinstance(v, type) and issubclass(v, Plugin) and v is not Plugin and v.__module__ == name:
+            return v()
+    for v in vars(mod).values():  # a file that only re-exports a plugin class
         if isinstance(v, type) and issubclass(v, Plugin) and v is not Plugin:
             return v()
     raise ValueError(f"{spec}: no Plugin subclass found")
@@ -212,3 +247,19 @@ class Plugins:
             r = self._guard(p, "report", p.report, model)
             out.extend(r or [])
         return out
+
+    def display(self, kind: str, name: str) -> str | None:
+        for p in list(self.active):
+            r = self._guard(p, "display", p.display, kind, name)
+            if r:
+                return r
+        return None
+
+    def card(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for p in list(self.active):
+            out.update(self._guard(p, "card", p.card) or {})
+        return out
+
+    def keep(self) -> list[str]:
+        return [g for p in self.active for g in p.perfetto_keep]

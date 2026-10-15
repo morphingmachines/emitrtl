@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from os import PathLike
+
 from dataclasses import dataclass, field
 
 from . import correlate
@@ -37,7 +39,7 @@ def open_trace(traces, elf=None, catalog=None, period=None, stall=64, only=None,
     m = Model(tr)
     e = Elf(elf) if elf else None
     if regions == "auto":
-        regions = discover_regions(catalog, *([traces] if isinstance(traces, str) else traces))
+        regions = discover_regions(catalog, *([traces] if isinstance(traces, (str, PathLike)) else traces))
     rmap = regions if isinstance(regions, RegionMap) else load_regions(regions) if regions else None
     ps = Plugins([load(p) if isinstance(p, str) else p for p in plugins], warn=warn)
     ps.setup(Context(e, dict(plugin_args or {}), tr, rmap))

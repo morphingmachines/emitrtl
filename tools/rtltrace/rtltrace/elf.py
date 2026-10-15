@@ -89,15 +89,21 @@ class Elf:
 
     def lookup(self, addr: int) -> tuple[Symbol, int] | None:
         """Symbol containing addr, with the offset into it."""
+        # Symbols that share an address (a size-0 NOTYPE label such as a section start next to the OBJECT or FUNC
+        # defined there) are considered together: a typed, sized symbol wins over a bare label.
+        rank = lambda s: (s.kind == "NOTYPE", s.size == 0, s.size)  # noqa: E731
         i = bisect.bisect_right(self._addrs, addr) - 1
         while i >= 0:
-            s = self.symbols[i]
-            if s.addr <= addr < s.addr + max(s.size, 1):
-                return s, addr - s.addr
-            if s.size == 0 and s.kind == "NOTYPE":
+            a0, group = self._addrs[i], []
+            while i >= 0 and self._addrs[i] == a0:
+                group.append(self.symbols[i])
                 i -= 1
-                continue
-            return None
+            hit = [s for s in group if addr < a0 + max(s.size, 1)]
+            if hit:
+                return min(hit, key=rank), addr - a0
+            if any(s.size or s.kind != "NOTYPE" for s in group):
+                return None  # addr is past the end of a real symbol: a gap
+            # only size-0 labels here: keep looking further back
         return None
 
     def symbolize(self, addr: int) -> str | None:

@@ -6,6 +6,8 @@ sim log, and kernel windows from the orchestrator's CeState probes.
 
 from __future__ import annotations
 
+import bisect
+import dataclasses
 import functools
 import importlib.util
 import json
@@ -22,6 +24,7 @@ class Kernel:
     t_ops: int | None
     op_kind: str
     args: list[tuple[object, int, str]] = field(default_factory=list)  # (shared key or None, size, dir)
+    buffers: list[tuple[int, str | None, int, str]] = field(default_factory=list)  # (arg index, name, size, dir)
 
     @property
     def d_in(self) -> int:
@@ -54,8 +57,10 @@ def load_workload(path: str) -> list[Kernel]:
         for i, k in enumerate(json.loads(p.read_text())["kernels"]):
             args = [(a.get("shared_id"), a["size"], a["dir"]) for a in k["args"]
                     if a["kind"] in ("buffer", "shared_buffer")]
+            bufs = [(j, a.get("name"), a["size"], a["dir"]) for j, a in enumerate(k["args"])
+                    if a["kind"] in ("buffer", "shared_buffer")]
             out.append(Kernel(k.get("entry") or Path(k["elf"]).stem or f"kernel{i}", k.get("t_ops"),
-                              k.get("op_kind", "fp"), args))
+                              k.get("op_kind", "fp"), args, bufs))
         return out
     kl = _kernel_launch_dir(p)
     if kl is not None:
@@ -69,14 +74,17 @@ def load_workload(path: str) -> list[Kernel]:
             sys.path.remove(str(kl))
     out = []
     for i, launch in enumerate(mod.LAUNCHES):
-        args = []
-        for a in launch.args:
+        args, bufs = [], []
+        for j, a in enumerate(launch.args):
             if hasattr(a, "shared"):
                 args.append((id(a.shared), a.shared.size, _dir(a.dir)))
+                bufs.append((j, getattr(a, "name", None) or getattr(a.shared, "name", None), a.shared.size,
+                             _dir(a.dir)))
             elif hasattr(a, "size") and hasattr(a, "dir"):
                 args.append((None, a.size, _dir(a.dir)))
+                bufs.append((j, getattr(a, "name", None), a.size, _dir(a.dir)))
         out.append(Kernel(getattr(launch, "entry", None) or Path(launch.elf).stem or f"kernel{i}",
-                          getattr(launch, "t_ops", None), getattr(launch, "op_kind", "fp"), args))
+                          getattr(launch, "t_ops", None), getattr(launch, "op_kind", "fp"), args, bufs))
     return out
 
 
@@ -253,6 +261,47 @@ def kernel_windows(m, ces, n_kernels: int, args: dict, warnings: list[str]) -> l
     return out
 
 
+def compute_arg(args: dict) -> set[str]:
+    """Region names of compute=<regions>. A number there is the old spelling of ce_phases' compute_frac= and is not
+    a region name."""
+    out = set()
+    for x in filter(None, args.get("compute", "").split(",")):
+        try:
+            float(x)
+        except ValueError:
+            out.add(x)
+    return out
+
+
+def window_names(names: list[str], n_windows: int) -> list[str]:
+    """Kernel name per measured window, the same in every plugin (the JSON summaries are joined by it):
+    several declared kernels measured as one window -> "a+b"; missing names -> kernel<i>; a kernel launched twice ->
+    "mm", "mm#2"."""
+    if n_windows == 1 and len(names) > 1:
+        out = ["+".join(names)]
+    else:
+        out = (list(names) + [f"kernel{i}" for i in range(len(names), n_windows)])[:n_windows]
+    seen, n = Counter(out), Counter()
+    for i, x in enumerate(out):
+        n[x] += 1
+        if seen[x] > 1 and n[x] > 1:
+            out[i] = f"{x}#{n[x]}"
+    return out
+
+
+def window_kernels(kernels: list[Kernel], n_windows: int) -> list[Kernel]:
+    """window_names() for Kernel records: a merged window gets the T_ops (None if any is missing) and the buffers of
+    all its kernels."""
+    names = window_names([k.name for k in kernels], n_windows)
+    if n_windows == 1 and len(kernels) > 1:
+        ks = kernels
+        return [Kernel(names[0], sum(k.t_ops for k in ks) if all(k.t_ops is not None for k in ks) else None,
+                       ks[0].op_kind if len({k.op_kind for k in ks}) == 1 else "mixed",
+                       [a for k in ks for a in k.args], [b for k in ks for b in k.buffers])]
+    ks = (list(kernels) + [Kernel("", None, "fp") for _ in range(len(kernels), n_windows)])[:n_windows]
+    return [dataclasses.replace(k, name=nm) for k, nm in zip(ks, names)]
+
+
 # ---------------------------------------------------------------------------------------------- CE phases (PC markers)
 #
 # A PC marker is `addi x0, x0, imm` (a nop). BEGIN carries an even id, END id|1; regions nest. Markers come from the
@@ -297,7 +346,11 @@ def ce_label(key: tuple[str, int], multi_cr: bool = False) -> str:
     if not multi_cr:
         return f"CE{i}"
     parts = prefix.split(".")
-    cr = parts[-2] if len(parts) > 1 and parts[-1] == "baseCr" else parts[-1]
+    if parts[-1] == "baseCr":
+        parts = parts[:-1]
+    # the nearest component that numbers the CR (…CR_Fabric_3.cr.baseCr -> CR_Fabric_3): the one right above
+    # baseCr is often a fixed wrapper name ("cr") shared by every CR
+    cr = next((x for x in reversed(parts) if re.search(r"\d", x)), parts[-1] if parts and parts[-1] else prefix)
     return f"{cr}.CE{i}"
 
 
@@ -480,7 +533,7 @@ def phase_stats(segs: list[PhaseSeg], points: list[tuple[float, int, int]], w0: 
         if c:
             out[s.label].cycles[s.state] += c
     starts = [s.t0 for s in segs]
-    pts = sorted(p for p in points if p[1] is not None)
+    pts = _unwrapped(points)
     for (ta, ia, fa), (tb, ib, fb) in zip(pts, pts[1:]):
         if not w0 <= ta < w1:
             continue
@@ -488,32 +541,67 @@ def phase_stats(segs: list[PhaseSeg], points: list[tuple[float, int, int]], w0: 
         if s is None:
             continue
         st = out[s.label]
-        st.instret += (ib - ia) % (1 << 32)
-        st.flops += ((fb or 0) - (fa or 0)) % (1 << 32)
+        # an interval that runs past the window end is charged pro rata (counters are linear between samples)
+        f = 1.0 if tb <= w1 or tb <= ta else (w1 - ta) / (tb - ta)
+        st.instret += round(f * (ib - ia))
+        st.flops += round(f * (fb - fa))
         st.counted = True
     return dict(out)
 
 
+def _unwrapped(points) -> list[tuple[float, int, int]]:
+    """Counter points in time order with the 32-bit instret/flops counters unwrapped (monotonic)."""
+    out: list[tuple[float, int, int]] = []
+    for t, i, f in sorted(p for p in points if p[1] is not None):
+        f = f or 0
+        if out:
+            pt, pi, pf = out[-1]
+            i = pi + (i - pi) % (1 << 32)
+            f = pf + (f - pf) % (1 << 32)
+        out.append((t, i, f))
+    return out
+
+
 def counters_in(points: list[tuple[float, int, int]], w0: float, w1: float) -> tuple[int, int] | None:
     """instret and flops retired inside [w0, w1] (linear between counter points)."""
-    pts = sorted(p for p in points if p[1] is not None)
+    pts = _unwrapped(points)
     if len(pts) < 2:
         return None
+    ts = [p[0] for p in pts]
 
     def at(t):
-        import bisect
-        i = bisect.bisect_right([p[0] for p in pts], t)
+        i = bisect.bisect_right(ts, t)
         if i == 0:
-            return pts[0][1], pts[0][2] or 0
+            return pts[0][1], pts[0][2]
         if i == len(pts):
-            return pts[-1][1], pts[-1][2] or 0
+            return pts[-1][1], pts[-1][2]
         (ta, ia, fa), (tb, ib, fb) = pts[i - 1], pts[i]
         f = (t - ta) / (tb - ta) if tb > ta else 0
-        di, df = (ib - ia) % (1 << 32), ((fb or 0) - (fa or 0)) % (1 << 32)
-        return ia + f * di, (fa or 0) + f * df
+        return ia + f * (ib - ia), fa + f * (fb - fa)
 
     (i0, f0), (i1, f1) = at(w0), at(w1)
     return round(i1 - i0), round(f1 - f0)
+
+
+def limited_by(st: PhaseStats, flops_per_cycle_peak: float, th: dict) -> str | None:
+    """Key of redefine_vocab.LIMITED_BY: like classify(), but busy-and-not-retiring is "blocked" (a flush or fence,
+    not waiting for a wake-up) and busy code with no FP work is "control"."""
+    tot = st.total or 1
+    waiting = (st.cycles.get("Suspended", 0) + sum(st.cycles.get(s, 0) for s in IDLE_STATES)) / tot
+    if waiting > th.get("wait", 0.5):
+        return "waiting"
+    if not st.counted or not st.busy:
+        return None
+    ipc = st.instret / st.busy
+    if ipc < th.get("idle_ipc", 0.05):
+        return "blocked"
+    if ipc < th.get("stall_ipc", 0.6):
+        return "stall"
+    if not st.flops:
+        return "control"
+    if st.flops / st.busy < th.get("compute", 0.6) * flops_per_cycle_peak:
+        return "instruction"
+    return "compute"
 
 
 def classify(st: PhaseStats, flops_per_cycle_peak: float, th: dict) -> str:
@@ -569,7 +657,7 @@ def phase_analysis(m, args: dict, timelines: dict, warnings: list[str]) -> dict:
     if source and not names:
         w.append("no marker names (pass markers=<pc_markers.h,...>): regions are shown by id")
     res = {"source": source, "names": names, "headers": [str(h) for h in hdrs], "phases": phases, "points": points,
-           "warnings": w}
+           "marks": marks, "warnings": w}  # marks: per CE key, from the probe or the commit log (not JSON)
     _PHASE_CACHE[ck] = res
     warnings.extend(x for x in w if x not in warnings)
     return res
@@ -644,3 +732,144 @@ def section_of(regions, addr) -> str | None:
 
 def is_data_section(label: str | None) -> bool:
     return bool(label) and label.split("[")[0] in DATA_SECTIONS
+
+
+# ---------------------------------------------------------------------------------------------- run registry
+# The plugins of one rtltrace run share their summaries here (keyed by model id) so the view plugin can build the
+# findings and the run card without re-computing anything.
+
+RUN: dict[tuple[int, str], dict] = {}
+
+
+def publish(m, name: str, summary: dict) -> None:
+    RUN[(id(m), name)] = summary
+
+
+def published(m, name: str) -> dict | None:
+    return RUN.get((id(m), name))
+
+
+# ---------------------------------------------------------------------------------------------- kernel buffers
+# launch.py names the buffer args (buffer(..., name="W")); the sim writes their addresses to
+# <workload>/rtl_sim_results/buffers.txt (buf_arg_<i>.bin  dir  addr_start  addr_end  size). Together they name the
+# kernel section each buffer lives in, so reports say "W" instead of "GlobalDataLow[r33]".
+
+@dataclass
+class Buffer:
+    name: str
+    arg: int
+    dir: str
+    start: int
+    end: int
+    size: int
+    section: str | None = None
+
+
+def _size(n: int) -> str:
+    return f"{n // 1024} KB" if n % 1024 == 0 and n >= 1024 else f"{n} B"
+
+
+def find_buffer_manifest(*anchors) -> Path | None:
+    for a in anchors:
+        if not a:
+            continue
+        d = Path(a).resolve()
+        d = d if d.is_dir() else d.parent
+        cand = d / "rtl_sim_results" / "buffers.txt"
+        if cand.is_file():
+            return cand
+    return None
+
+
+_BUF_LINE = re.compile(r"^buf_arg_(\d+)\S*\s+(\w+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(\d+)")
+_BUF_CACHE: dict = {}
+
+
+def kernel_buffers(args: dict, regions, warnings: list[str] | None = None) -> list[Buffer]:
+    """Buffers of the (first) kernel with addresses and kernel section. Plugin args: buffers=<buffers.txt> (default:
+    rtl_sim_results/buffers.txt next to launch= / elf=), launch= for the names."""
+    key = (args.get("buffers"), args.get("launch"), args.get("elf"), getattr(regions, "source", None))
+    if key in _BUF_CACHE:
+        return _BUF_CACHE[key]
+    out: list[Buffer] = []
+    man = Path(args["buffers"]) if args.get("buffers") else find_buffer_manifest(args.get("launch"), args.get("elf"))
+    names = {}
+    if args.get("launch"):
+        ks = load_workload(args["launch"])
+        if ks:
+            names = {i: (n, size, d) for i, n, size, d in ks[0].buffers}
+    if man is not None and man.is_file():
+        for line in man.read_text().splitlines():
+            mt = _BUF_LINE.match(line.strip())
+            if not mt:
+                continue
+            i, d, a0, a1, size = int(mt.group(1)), mt.group(2), int(mt.group(3), 0), int(mt.group(4), 0), int(mt.group(5))
+            n, lsize, _ = names.get(i, (None, None, None))
+            if lsize is not None and lsize != size and warnings is not None:
+                warnings.append(f"{man}: arg {i} has {size} B but launch.py declares {lsize} B; buffer names may be "
+                                "stale (re-run the sim)")
+            out.append(Buffer(n or f"arg{i}", i, d, a0, a1, size))
+    if regions is not None:
+        for b in out:
+            s0, s1 = section_of(regions, b.start), section_of(regions, b.end)
+            b.section = s0 if s0 == s1 else None
+        secs = Counter(b.section for b in out)
+        for b in out:
+            if secs[b.section] > 1:
+                b.section = None  # two buffers share the section: it cannot be named after one of them
+    _BUF_CACHE[key] = out
+    return out
+
+
+def buffer_sections(bufs: list[Buffer]) -> dict[str, str]:
+    """Kernel-section label -> 'W (in, 64 KB)' for sections that hold exactly one buffer."""
+    return {b.section: f"{b.name} ({b.dir}, {_size(b.size)})" for b in bufs if b.section}
+
+
+# ---------------------------------------------------------------------------------------------- friendly names
+
+try:
+    from rtltrace.plugin import RtlName
+except ImportError:  # used outside an rtltrace run (metrics_sweep): plain strings
+    class RtlName(str):  # type: ignore[no-redef]
+        def __new__(cls, text, rtl=""):
+            s = super().__new__(cls, text)
+            s.rtl = rtl
+            return s
+
+
+class Names:
+    """Friendly names (RtlName: the RTL identifier stays attached) for one run."""
+
+    def __init__(self, args: dict, regions=None, warnings: list[str] | None = None, trace=None):
+        import redefine_vocab as v
+        self.v = v
+        self.bufs = kernel_buffers(args, regions, warnings) if regions is not None else []
+        self.buffers = buffer_sections(self.bufs)
+        crs = {p.inst.split(".baseCr")[0] for p in trace.probes.values() if ".baseCr" in p.inst} if trace else set()
+        self.multi_cr = len(crs) > 1
+
+    def module(self, inst: str, short: str | None = None) -> RtlName:
+        n = self.v.module_name(inst)
+        if n and self.multi_cr and ".baseCr" in inst:
+            n = f"{inst.split('.baseCr')[0].rsplit('.', 1)[-1]} · {n}"
+        return RtlName(n or short or inst, inst)
+
+    def ce(self, inst_or_key) -> RtlName:
+        k = inst_or_key if isinstance(inst_or_key, tuple) else ce_key(inst_or_key)
+        rtl = inst_or_key if isinstance(inst_or_key, str) else f"{k[0]}.core_{k[1]}" if k else "?"
+        return RtlName(ce_label(k, self.multi_cr) if k else str(inst_or_key), rtl)
+
+    def client(self, c) -> RtlName:
+        return RtlName(self.v.client_name(str(c)) or str(c), str(c))
+
+    def port(self, p: str) -> RtlName:
+        return RtlName(self.v.port_name(p) or p, p)
+
+    def section(self, label) -> RtlName | None:
+        if label is None:
+            return None
+        return RtlName(self.v.section_name(label, self.buffers) or label, label)
+
+    def region(self, label: str) -> RtlName:
+        return RtlName(self.v.region_name(label), label)

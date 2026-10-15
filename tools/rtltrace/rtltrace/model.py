@@ -73,14 +73,18 @@ class Txn:
 
     @property
     def end(self) -> float | None:
-        return None if self.resp_last is None else self.resp_last + self.port.period / self.port.base
+        # TileLink lets a slave acknowledge a multi-beat Put before its last A beat, so the transaction ends with
+        # whichever channel finishes last
+        if self.resp_last is None:
+            return None
+        return max(self.resp_last, self.req_last) + self.port.period / self.port.base
 
     @property
     def latency(self) -> int | None:
-        """Cycles from the last request beat to the first response beat."""
+        """Cycles from the last request beat to the first response beat (0 for an early ack)."""
         if self.resp_first is None:
             return None
-        return int(round((self.resp_first - self.req_last) * self.port.base / self.port.period))
+        return max(0, int(round((self.resp_first - self.req_last) * self.port.base / self.port.period)))
 
     @property
     def total(self) -> int | None:
@@ -203,7 +207,16 @@ class Model:
         release: dict[int, Txn] = {}  # C Release -> D ReleaseAck
         probes: dict[int, Txn] = {}  # B Probe -> C ProbeAck (by address)
         grants: dict[int, Txn] = {}  # sink -> Grant waiting for E
+        # a repeated DECL is a reset of the port's module: whatever was in flight is dropped (it stays unfinished)
+        # and is never paired with traffic after the reset
+        resets = sorted({d for q in port.probes.values() for d in sorted(q.decl_times)[1:]})
+        ri = 0
         for e in evs:
+            if ri < len(resets) and resets[ri] <= e.t:
+                while ri < len(resets) and resets[ri] <= e.t:
+                    ri += 1
+                for tbl in (by_source, release, probes, grants):
+                    tbl.clear()
             p, v, ch = e.probe, e.vals, e.probe.channel
             op = p.enum_name("opcode", v.get("opcode", -1)) or str(v.get("opcode"))
             if ch == "a":
