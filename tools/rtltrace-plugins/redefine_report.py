@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One simulation log -> kernel performance report (HTML + Markdown + CSV), Perfetto timeline and the JSON summaries
-(REDEFINE metrics γe/ρ/φ, CE code regions, CR-DMA utilisation, cache hit/miss, findings).
+(REDEFINE metrics γe/ρ/φ, CE code regions, CR-DMA utilisation, cache hit/miss, off-chip traffic by kernel buffer,
+findings).
 
     <emitrtl>/tools/rtltrace-plugins/redefine_report.py <sim log> [--elf prog.elf] [--launch launch.py] [-o outdir]
 
@@ -13,7 +14,8 @@ Inputs that are not given are discovered:
   --elf      the *.elf next to launch.py
   --config   the RTL config dir (parameters.md + trace_points.json): generated_sv_dir/<config>/ found by walking up
              from the log; when several configs exist the one matching the testbench (sb-cr-sim -> SimCR) is used
-  buffers    rtl_sim_results/buffers.txt next to launch.py / the ELF (buffer addresses -> buffer names in the report)
+  buffers    the [kernel_buffers] table the sim prints into the log, else rtl_sim_results/buffers.txt next to
+             launch.py / the ELF (buffer addresses -> buffer names in the report; --arg buffers=<file> overrides)
 
 Writes into outdir (default <log stem>_reports/ next to the log):
   <stem>.summary.md        the report body as Markdown (findings, efficiency, CE time, code regions, DMA, caches,
@@ -26,6 +28,8 @@ Writes into outdir (default <log stem>_reports/ next to the log):
   <stem>.findings.json     ranked findings          <stem>.metrics.json   γe/ρ/φ, sub-windows, waterfall
   <stem>.phases.json       CE time by PC region     <stem>.dma.json       CR-DMA utilisation
   <stem>.cache.json        cache hit/miss, hazards  <stem>.overlap.json   compute / DMA overlap
+  <stem>.llc_out.json      off-chip (LLC_out) traffic by kernel buffer / section / address range
+  <stem>.llc_out.csv       every LLC_out transaction (time, opcode, address, bytes, buffer, section, client)
 
 PC-marker names come from *pc_markers*.h next to launch.py / the ELF and the SDK runtime header (or --arg
 markers=a.h,b.h). Without the RTL ce_marker probe, markers are read from the commit lines of the log.
@@ -48,6 +52,7 @@ TESTBENCH_TOPS = {"sb-cr-sim": "SimCR", "sb-redefineip-sim": "SimRedefineIP", "s
                   "sb-fabric-sim": "Fabric"}
 VIEW_PLUGIN = HERE / "redefine_view.py"
 OVERLAP_PLUGIN = HERE / "overlap_metrics.py"
+LLC_OUT_PLUGIN = HERE / "llc_out.py"
 
 
 def find_config(log: Path) -> Path | None:
@@ -109,6 +114,7 @@ def main() -> int:
     phases_json, dma_json = out / f"{stem}.phases.json", out / f"{stem}.dma.json"
     findings_json = out / f"{stem}.findings.json"
     overlap_json = out / f"{stem}.overlap.json"
+    llc_out_json, llc_out_csv = out / f"{stem}.llc_out.json", out / f"{stem}.llc_out.csv"
 
     print(f"log     {log}\nelf     {elf or '-'}\nlaunch  {launch or '- (no D_i/D_o, no declared T_ops)'}\n"
           f"config  {config or '- (no parameters.md / trace_points.json)'}\nout     {out}")
@@ -116,7 +122,8 @@ def main() -> int:
     pargs = {"log": log}
     # the JSON summaries are written by one run only: the runs go in parallel and would write the same files
     jargs = {"json": metrics_json, "cache_json": cache_json, "phases_json": phases_json, "dma_json": dma_json,
-             "findings_json": findings_json, "overlap_json": overlap_json}
+             "findings_json": findings_json, "overlap_json": overlap_json, "llc_out_json": llc_out_json,
+             "llc_out_csv": llc_out_csv}
     if launch:
         pargs["launch"] = launch
     if elf:
@@ -127,8 +134,8 @@ def main() -> int:
     if bad:
         sys.exit(f"--arg expects key=value, got {bad[0]!r}")
     pargs.update(kv.split("=", 1) for kv in a.arg)
-    common = [str(log)] + [x for p in (PLUGIN, PHASES_PLUGIN, DMA_PLUGIN, OVERLAP_PLUGIN, CACHE_PLUGIN, VIEW_PLUGIN)
-                           for x in ("--plugin", str(p))]
+    common = [str(log)] + [x for p in (PLUGIN, PHASES_PLUGIN, DMA_PLUGIN, OVERLAP_PLUGIN, CACHE_PLUGIN, LLC_OUT_PLUGIN,
+                                       VIEW_PLUGIN) for x in ("--plugin", str(p))]
     common += [x for k, v in pargs.items() for x in ("--plugin-arg", f"{k}={v}")]
     if elf:
         common += ["--elf", str(elf)]

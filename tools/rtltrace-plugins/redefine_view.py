@@ -27,7 +27,7 @@ from rtltrace.plugin import Plugin, RtlName, Section
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import redefine_vocab as V  # noqa: E402
-from redefine_common import (Names, _seg_at, ce_key, ce_label, find_buffer_manifest, phase_analysis,  # noqa: E402
+from redefine_common import (Names, _seg_at, buffer_tables, ce_key, ce_label, phase_analysis,  # noqa: E402
                              ce_timelines, plugin_regions, published)
 from redefine_findings import MIN_PCT, findings  # noqa: E402
 
@@ -135,14 +135,14 @@ class RedefineView(Plugin):
             f"launch {Path(self.args['launch']).name}" if self.args.get("launch") else "no launch.py (no T_ops / "
                                                                                        "buffer names)",
             f"PC-marker names from {', '.join(Path(h).name for h in hdrs)}" if hdrs else "no PC-marker header",
-            f"buffer addresses from {_short(self._manifest())}" if self._manifest() else "no buffers.txt "
-                                                                                          "(buffers shown by section)",
+            f"buffer addresses from {self._manifest()}" if self._manifest() else "no buffer address table "
+                                                                                 "(buffers shown by section)",
         ) if x)
         return out
 
-    def _manifest(self):
-        return (Path(self.args["buffers"]) if self.args.get("buffers") else
-                find_buffer_manifest(self.args.get("launch"), self.args.get("elf")))
+    def _manifest(self) -> str | None:
+        src = buffer_tables(self.args)[1]
+        return src if src in (None, "sim log") else _short(src)
 
     # ------------------------------------------------------------------ report
     def report(self, m) -> list[Section]:

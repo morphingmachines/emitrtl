@@ -750,9 +750,17 @@ def published(m, name: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------------------------- kernel buffers
-# launch.py names the buffer args (buffer(..., name="W")); the sim writes their addresses to
-# <workload>/rtl_sim_results/buffers.txt (buf_arg_<i>.bin  dir  addr_start  addr_end  size). Together they name the
-# kernel section each buffer lives in, so reports say "W" instead of "GlobalDataLow[r33]".
+# launch.py names the buffer args (buffer(..., name="W")); the sim's host driver assigns their addresses at run time
+# and publishes them (kernel-exec-environment README, "Buffer address table"): one block per kernel launch in the sim
+# log, and the same table without the marker in <workload>/rtl_sim_results/buffers.txt:
+#
+#   [kernel_buffers]
+#   name                  param       dir     addr_start    addr_end      size_bytes      <- header, skipped
+#   buf_arg_0.bin         A           in      0x60000000    0x60003fff    16384
+#
+# `param` is `-` when launch.py gave no name. Older drivers wrote the 5-column form without `param` and printed the
+# block after `[load_kernel_env] buffer addresses:`; both are accepted. Together with the kernel sections they name the
+# section each buffer lives in, so reports say "W" instead of "GlobalDataLow[r33]".
 
 @dataclass
 class Buffer:
@@ -781,34 +789,119 @@ def find_buffer_manifest(*anchors) -> Path | None:
     return None
 
 
-_BUF_LINE = re.compile(r"^buf_arg_(\d+)\S*\s+(\w+)\s+(0x[0-9a-fA-F]+)\s+(0x[0-9a-fA-F]+)\s+(\d+)")
+BUF_MARKERS = ("[kernel_buffers]", "[load_kernel_env] buffer addresses:")
+_BUF_MANIFEST = re.compile(r"\[load_kernel_env\] buffer manifest -> (\S+)")
+_BUF_DIRS = ("in", "out", "inout")
 _BUF_CACHE: dict = {}
+_BUF_LOG_CACHE: dict = {}
+
+
+def parse_buffer_row(line: str, index: int) -> Buffer | None:
+    """One table row (6-column `name param dir start end size` or 5-column `name dir start end size`), else None.
+    `index` is the argument index used when the file name is not buf_arg_<i>.bin."""
+    f = line.split()
+    if len(f) == 6:
+        fname, param, d, a0, a1, size = f
+    elif len(f) == 5:
+        (fname, d, a0, a1, size), param = f, "-"
+    else:
+        return None
+    if d not in _BUF_DIRS:
+        return None
+    try:
+        a0, a1, size = int(a0, 16), int(a1, 16), int(size)
+    except ValueError:
+        return None
+    mt = re.match(r"buf_arg_(\d+)", fname)
+    i = int(mt.group(1)) if mt else index
+    return Buffer(param if param != "-" else f"arg{i}", i, d, a0, a1, size)
+
+
+def read_buffer_file(path) -> list[Buffer]:
+    """buffers.txt: every line that is a table row (the header and anything else is skipped)."""
+    out = []
+    for line in Path(path).read_text().splitlines():
+        b = parse_buffer_row(line, len(out))
+        if b:
+            out.append(b)
+    return out
+
+
+def buffer_tables_from_log(log) -> tuple[list[list[Buffer]], list[str]]:
+    """(one buffer list per `[kernel_buffers]` block in the sim log, buffers.txt paths the log names)."""
+    p = Path(log)
+    key = (str(p), p.stat().st_mtime_ns)
+    if key in _BUF_LOG_CACHE:
+        return _BUF_LOG_CACHE[key]
+    tables, manifests, cur = [], [], None
+    with open(p, errors="replace") as f:
+        for line in f:
+            if cur is not None:
+                if cur == "header":
+                    cur = []
+                    continue
+                b = parse_buffer_row(line, len(cur))
+                if b:
+                    cur.append(b)
+                    continue
+                if cur:
+                    tables.append(cur)
+                cur = None
+            if line.startswith(BUF_MARKERS):
+                cur = "header"
+            elif "buffer manifest ->" in line:
+                mt = _BUF_MANIFEST.search(line)
+                if mt:
+                    manifests.append(mt.group(1))
+    if isinstance(cur, list) and cur:
+        tables.append(cur)
+    _BUF_LOG_CACHE[key] = (tables, manifests)
+    return tables, manifests
+
+
+def buffer_tables(args: dict, warnings: list[str] | None = None) -> tuple[list[list[Buffer]], str | None]:
+    """Buffer addresses of every kernel launch, and where they came from. In order: buffers=<file>[,<file>...] (one
+    per kernel), the `[kernel_buffers]` blocks in log=, the buffers.txt the log names, rtl_sim_results/buffers.txt next
+    to launch= / elf=. A file is only a fallback: a later run may have overwritten it."""
+    if args.get("buffers"):
+        files = [f for f in str(args["buffers"]).split(",") if f]
+        return [read_buffer_file(f) for f in files if Path(f).is_file()], ", ".join(files)
+    manifests = []
+    log = args.get("log")
+    if log and Path(log).is_file():
+        tables, manifests = buffer_tables_from_log(log)
+        if tables:
+            return tables, "sim log"
+    man = next((Path(m) for m in manifests if Path(m).is_file()), None) or \
+        find_buffer_manifest(args.get("launch"), args.get("elf"))
+    if man is None:
+        return [], None
+    if log and warnings is not None:
+        warnings.append(f"the sim log has no [kernel_buffers] table; buffer addresses read from {man} (written by "
+                        "the last run of this workload: check it is this run)")
+    return [read_buffer_file(man)], str(man)
 
 
 def kernel_buffers(args: dict, regions, warnings: list[str] | None = None) -> list[Buffer]:
-    """Buffers of the (first) kernel with addresses and kernel section. Plugin args: buffers=<buffers.txt> (default:
-    rtl_sim_results/buffers.txt next to launch= / elf=), launch= for the names."""
-    key = (args.get("buffers"), args.get("launch"), args.get("elf"), getattr(regions, "source", None))
+    """Buffers of the (first) kernel with addresses and kernel section (addresses from buffer_tables(); names from
+    launch= when it names them, else the table's param column)."""
+    key = (args.get("buffers"), str(args.get("log")), args.get("launch"), args.get("elf"),
+           getattr(regions, "source", None))
     if key in _BUF_CACHE:
         return _BUF_CACHE[key]
-    out: list[Buffer] = []
-    man = Path(args["buffers"]) if args.get("buffers") else find_buffer_manifest(args.get("launch"), args.get("elf"))
+    tables, src = buffer_tables(args, warnings)
     names = {}
     if args.get("launch"):
         ks = load_workload(args["launch"])
         if ks:
             names = {i: (n, size, d) for i, n, size, d in ks[0].buffers}
-    if man is not None and man.is_file():
-        for line in man.read_text().splitlines():
-            mt = _BUF_LINE.match(line.strip())
-            if not mt:
-                continue
-            i, d, a0, a1, size = int(mt.group(1)), mt.group(2), int(mt.group(3), 0), int(mt.group(4), 0), int(mt.group(5))
-            n, lsize, _ = names.get(i, (None, None, None))
-            if lsize is not None and lsize != size and warnings is not None:
-                warnings.append(f"{man}: arg {i} has {size} B but launch.py declares {lsize} B; buffer names may be "
-                                "stale (re-run the sim)")
-            out.append(Buffer(n or f"arg{i}", i, d, a0, a1, size))
+    out: list[Buffer] = []
+    for b in (tables[0] if tables else []):
+        n, lsize, _ = names.get(b.arg, (None, None, None))
+        if lsize is not None and lsize != b.size and warnings is not None:
+            warnings.append(f"{src}: arg {b.arg} has {b.size} B but launch.py declares {lsize} B; buffer names may "
+                            "be stale (re-run the sim)")
+        out.append(dataclasses.replace(b, name=n or b.name))
     if regions is not None:
         for b in out:
             s0, s1 = section_of(regions, b.start), section_of(regions, b.end)

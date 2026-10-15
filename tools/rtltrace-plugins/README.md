@@ -7,6 +7,9 @@
 - `ce_phases.py`: where each CE's time goes, by PC-marker region (phase), with IPC, FMA rate and a bound class.
 - `dma_metrics.py`: CR-DMA utilisation (requests, throughput, why the engine waits).
 - `cache_metrics.py`: LLC and L1-D hits, misses and hit/miss ratios. See [Cache metrics](#cache-metrics).
+- `llc_out.py`: what crosses the off-chip boundary (LLC_out), by kernel buffer (A, W, Z, ...), memory section and
+  address range: which part of ρ is the kernel's data. See [Off-chip traffic by kernel buffer](#off-chip-traffic-by-kernel-buffer-llc_outpy).
+  `llc_out_tally.py` runs it alone and writes per-transaction CSVs.
 
 `redefine_common.py` holds what they share: workload loading, `parameters.md` parsing, the commit-log parse
 (retired-instruction counts, markers, counter samples), kernel windows, sub-windows, the CE-phase engine and kernel
@@ -68,8 +71,9 @@ The simulated RTL must be built with the probes: `trace_points.json` and `kernel
 
 ### One workload, everything in one go
 
-`redefine_report.py` takes a sim log, plus optionally the ELF and/or `launch.py`, runs the four metric plugins and
-the overlap plugin (`overlap_metrics.py`) and the view plugin (`redefine_view.py`) in one `rtltrace report` and one `rtltrace perfetto` (in parallel), and writes
+`redefine_report.py` takes a sim log, plus optionally the ELF and/or `launch.py`, runs the four metric plugins, the
+overlap plugin (`overlap_metrics.py`), the off-chip traffic plugin (`llc_out.py`) and the view plugin
+(`redefine_view.py`) in one `rtltrace report` and one `rtltrace perfetto` (in parallel), and writes
 into `-o <dir>` (default `<log stem>_reports/` next to the log):
 
 | File | Contents |
@@ -85,6 +89,8 @@ into `-o <dir>` (default `<log stem>_reports/` next to the log):
 | `<stem>.dma.json` | CR-DMA windows, per-request records, traffic by section, gate histogram, `issues` (`dma_overflow` / `dma_error` events: correctness findings) |
 | `<stem>.cache.json` | LLC / L1-D / scratchpad tables, hit/miss by section, hazard issues |
 | `<stem>.overlap.json` | Compute / DMA overlap per CE, prefetch iterations, engine demand vs capacity, buffer safety |
+| `<stem>.llc_out.json` | Off-chip (LLC_out) traffic by kernel buffer, by memory section, and every contiguous address range |
+| `<stem>.llc_out.csv` | Every LLC_out A-channel transaction: time, opcode, address, bytes, buffer, section, client |
 
 The report is ordered the way a kernel developer debugs: **1 Findings** (correctness first, then the biggest losses
 of CE time, each with evidence, a suggestion and the RTL probes it rests on) → **2 Efficiency** (γe, ρ, φ, traffic by
@@ -94,8 +100,9 @@ throughput, why the engine waits) → **6 Memory hierarchy** (LLC by buffer and 
 **7 Checks and tool warnings** → appendices (glossary, probe groups in this run, hardware detail, RTL name map).
 Names come from `redefine_vocab.py` (one place for every label and glossary entry): `CE2 L1-D / scratchpad`
 instead of `baseCr.core_2.rockettile.dcache`, `runtime · DMA LLC→SPM call` instead of `rt.DMA_LLC2SPM`, buffer names
-from `launch.py` (`W (in, 64 KB)`) instead of `GlobalDataLow[r33]` (addresses from `rtl_sim_results/buffers.txt`, or
-`--arg buffers=<file>`). Every friendly name keeps its RTL identifier (tooltip, CSV column, name map, Perfetto args).
+from `launch.py` (`W (in, 64 KB)`) instead of `GlobalDataLow[r33]` (addresses from the `[kernel_buffers]` table the
+sim prints into the log, else `rtl_sim_results/buffers.txt`, or `--arg buffers=<file>`; see
+[Kernel buffer addresses](#kernel-buffer-addresses)). Every friendly name keeps its RTL identifier (tooltip, CSV column, name map, Perfetto args).
 
 Inputs that are not given are discovered:
 - `launch.py` and the ELF are found from each other;
@@ -128,8 +135,8 @@ python3 -m rtltrace report <sim.log> -o report.html \
 ```
 
 Add `--plugin <this dir>/ce_phases.py --plugin <this dir>/dma_metrics.py --plugin <this dir>/overlap_metrics.py
---plugin <this dir>/cache_metrics.py --plugin <this dir>/redefine_view.py` (in this order: overlap_metrics needs
-ce_phases and dma_metrics, redefine_view goes last) and `--regions`, `--catalog`, `--elf` for the rest; this is what
+--plugin <this dir>/cache_metrics.py --plugin <this dir>/llc_out.py --plugin <this dir>/redefine_view.py` (in this
+order: overlap_metrics needs ce_phases and dma_metrics, redefine_view goes last) and `--regions`, `--catalog`, `--elf` for the rest; this is what
 `redefine_report.py` does.
 
 `python3 -m rtltrace perfetto ...` with the same plugin args adds these processes to the Perfetto trace:
@@ -138,6 +145,8 @@ ce_phases and dma_metrics, redefine_view goes last) and `--regions`, `--catalog`
 - **CE phases:** one track per CE with nested PC-marker regions, and per-CE `IPC` and `flops/cycle` counters;
 - **CR-DMA:** one span per request (`requests`) and a `bytes/cycle` counter;
 - **Cache metrics:** hit-% counters per cache, and miss instants with `miss_marks=1`.
+- **Off-chip boundary (`llc_out.py`):** one cumulative-bytes counter per kernel buffer and per memory section outside
+  them.
 
 ### Many workloads
 
@@ -384,6 +393,62 @@ dmaMatmul: transfers run under 98 % of the compute and no buffer is touched whil
 ~1,950 cycles behind two other CEs' requests and transfers in 712, against 2,047 cycles of compute: the data is
 ready in time in 1 % of iterations and each iteration waits ~650 cycles. The four CEs need 2.07 B/cycle and the
 engine delivers 1.42 (1.46×), so the fix is more work per transferred byte, not deeper prefetch.
+
+### Off-chip traffic by kernel buffer (`llc_out.py`)
+
+Every A-channel transaction on the off-chip boundary port (`LLC?out`, as `redefine_metrics.py`) is attributed to a
+kernel buffer by address or, outside the buffers, to its memory section and to contiguous line ranges. Per kernel
+window (report chapter **2 Efficiency**, after "Off-chip traffic by buffer / memory section"):
+
+- **kernel buffers vs everything else:** off-chip bytes (same window test and opcode rules as `redefine_metrics.py`,
+  so the total equals its D_D) inside the kernel buffers and outside them, and ρ if only the buffers crossed;
+- **per kernel buffer and opcode:** transactions, bytes, % of off-chip, unique lines, coverage (unique lines × line /
+  buffer size; 1 = every line) and the most times one line crossed (1 = no re-fetch);
+- **outside the buffers:** by memory section and opcode; every contiguous address range is in the hardware-detail
+  appendix, `<stem>.llc_out.json` and `<stem>.llc_out.csv`.
+
+dmaMatmul (1 CR, 584130f RTL): A, W and Z each cross exactly once (98,304 B = D_i + D_o, so ρ would be 1.0). The
+other 141,728 B are group-local-memory write-backs (81,952 B at 0x40080000-0x40093fff, the size of A + W), context
+memory (~55 KB) and code fetch (~4.5 KB): ρ = 2.44.
+
+| Arg | Meaning |
+|---|---|
+| `log` | Sim log holding the `[kernel_buffers]` tables (`redefine_report.py` passes it) |
+| `buffers` | Buffer table file(s), comma-separated per kernel, instead of the log |
+| `boundary` | Port glob (default `LLC?out`) |
+| `line` | Line size for unique lines and ranges (default 32) |
+| `from`, `to` | Manual kernel window |
+| `llc_out_json`, `llc_out_csv` | Write the summary / every transaction here |
+
+```sh
+<this dir>/llc_out_tally.py <sim.log> --config <generated_sv_dir/<config>> [--launch launch.py] \
+    [--metrics <stem>.metrics.json] -o <dir>     # prints the tables, checks D_D against the metrics JSON
+```
+
+### Kernel buffer addresses
+
+Buffer addresses are chosen by the host driver at run time, so they come from the run, not from `launch.py`. The
+sim's host driver (`mm-baremetal-examples/kernel-exec-environment`) prints one block per kernel launch into the sim
+log and writes the same table, without the marker, to `<workload>/rtl_sim_results/buffers.txt`:
+
+```
+[kernel_buffers]
+name                  param       dir     addr_start    addr_end      size_bytes
+buf_arg_0.bin         A           in      0x60000000    0x60003fff    16384
+buf_arg_1.bin         W           in      0x64000000    0x6400ffff    65536
+buf_arg_2.bin         Z           out     0x68000000    0x68003fff    16384
+```
+
+The line after the marker is a header (skipped); rows have 6 whitespace-separated fields; `param` is the name from
+`buffer(..., name="A")` in `launch.py` (`-` if none); `dir` is `in` / `out` / `inout`; `addr_end` is the last byte,
+inclusive; the block ends at the first line that is not a row. The 5-column form without `param` and the older marker
+`[load_kernel_env] buffer addresses:` are also accepted. Any other host code that places kernel buffers should print
+this block, then every plugin picks the addresses up. The full spec is in
+`mm-baremetal-examples/kernel-exec-environment/README.md` ("Buffer address table").
+
+`redefine_common.buffer_tables()` reads, in order: `buffers=<file>[,<file per kernel>]`; the blocks in the log; the
+`buffers.txt` the log names; `rtl_sim_results/buffers.txt` next to `launch.py` / the ELF. The two file fallbacks
+are reported in the warnings (a later run may have overwritten the file).
 
 ### Scratchpad probes (group `l1d_spm`, off by default)
 
