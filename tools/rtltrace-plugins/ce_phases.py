@@ -39,8 +39,8 @@ from rtltrace.plugin import Plugin, RtlName, Section
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import redefine_vocab as V  # noqa: E402
 from redefine_common import (IDLE_STATES, PhaseStats, _r, ce_label, ce_timelines, classify,  # noqa: E402
-                             kernel_windows, limited_by, load_workload, phase_analysis, phase_stats, publish,
-                             window_names)
+                             kernel_windows, limited_by, load_workload, mix_cycles, phase_analysis, phase_stats,
+                             publish, window_names)
 
 
 class CePhases(Plugin):
@@ -87,13 +87,14 @@ class CePhases(Plugin):
             total: dict[str, PhaseStats] = {}
             multi = len({k[0] for k in pa["phases"]}) > 1
             for k, segs in sorted(pa["phases"].items()):
-                stats = phase_stats(segs, pa["points"].get(k, []), w0, w1)
+                stats = phase_stats(segs, pa["points"].get(k, []), w0, w1, pa["mix"].get(k))
                 for lab, st in stats.items():
                     self.rows.append(self._row(kname, ce_label(k, multi), lab, st, w1 - w0))
                     t = total.setdefault(lab, PhaseStats())
                     t.cycles.update(st.cycles)
                     t.instret += st.instret
                     t.flops += st.flops
+                    t.mix.update(st.mix)
                     t.counted |= st.counted
             n = len(pa["phases"]) or 1
             for lab, st in total.items():
@@ -113,7 +114,8 @@ class CePhases(Plugin):
                 "ipc": st.instret / busy if st.counted and busy else None,
                 "flops": st.flops if st.counted else None,
                 "flops_per_cycle": st.flops / busy if st.counted and busy else None,
-                "class": classify(st, self.peak, self.th), "limited_by": limited_by(st, self.peak, self.th)}
+                "class": classify(st, self.peak, self.th), "limited_by": limited_by(st, self.peak, self.th),
+                "mix": mix_cycles(st)}
 
     def _perfetto(self, m, out, pa):
         if not pa["source"]:
@@ -174,6 +176,20 @@ class CePhases(Plugin):
                        "open region.", legend=lg, group=G, order=b, key="CE phases · all CEs (CE-cycles)"),
                Section("Code regions · per CE", cols, [fmt(r) for r in per], "% is of the kernel window.",
                        group=G, order=b + 1, key="CE phases · per CE")]
+        mixr = [r for r in allr if r["mix"] and r["busy"]]
+        if mixr:
+            mc = ("fma", "fp_other", "load", "store", "other", "stall")
+            out.append(Section(
+                "Busy cycles by instruction type · all CEs",
+                ["kernel", "region", "busy cycles", "FMA", "other FP arithmetic", "loads", "stores",
+                 "other instructions", "no instruction retired", "FMA % of busy"],
+                [[r["kernel"], RtlName(V.region_name(r["region"]), r["region"]), round(r["busy"])] +
+                 [round(r["mix"][k]) for k in mc] + [_r(100 * r["mix"]["fma"] / r["busy"], 3)] for r in mixr],
+                "Busy CE-cycles of each region split by what the CE retired in them: one cycle per retired "
+                "instruction (single-issue core), the classes from the instruction words of the commit lines in "
+                "the sim log, and the cycles in which nothing retired. The columns add up to 'busy cycles'.",
+                legend=V.legend("FMA instructions", "no instruction retired"), group=G, order=b + 0.5,
+                key="CE phases · busy cycles by instruction type"))
         if self.warnings:
             G, b = V.G_CHECK
             out.append(Section("Tool warnings · code regions", ["warning"], [[w] for w in self.warnings],

@@ -283,7 +283,17 @@ def findings(metrics: dict | None, phases: dict | None = None, dma: dict | None 
                                  f"{100 * r['flops_per_cycle'] / peak:.0f} % of peak, IPC {_f(r.get('ipc'))} "
                                  f"({V.LIMITED_BY.get(r.get('limited_by'), '–')})")
                     acts.add(r.get("limited_by"))
-                act = ("Raise FMA density in the compute loop: unroll further, keep more accumulators in "
+                mx = next((w.get(x) for x in ("mix",) if w.get(x)), None)
+                cap = (f"Even with no stalls the issue slot would cap this at {100 * mx['fma'] / mx['instret']:.0f} % "
+                       f"of peak ({_f(mx['fma'])} FMAs among {_f(mx['instret'])} retired instructions). "
+                       if mx and mx.get("instret") else "")
+                act = (cap + "Raise FMAs per load: a larger register tile if the registers allow (an m×n tile loads "
+                       "(m+n) values per m·n FMAs) and unroll the loop so the pointer updates and the branch are "
+                       "shared by more FMAs. Separately, the cycles with nothing retired are stalls (load-use "
+                       "latency, FP latency, scratchpad contention): schedule loads earlier and check the "
+                       "scratchpad section."
+                       if "instruction" in acts and cap else
+                       "Raise FMA density in the compute loop: unroll further, keep more accumulators in "
                        "registers, and cut loads / address arithmetic per FMA (a larger register tile)."
                        if "instruction" in acts else
                        "Reduce stalls in the compute loop: more independent accumulators (FP latency), fewer "
@@ -291,11 +301,18 @@ def findings(metrics: dict | None, phases: dict | None = None, dma: dict | None 
                        "Compare IPC and flops/cycle of the compute regions in Code regions · all CEs." if parts else
                        "Add PC markers around the compute loop (ce_marker probe, group ce_phase, on) to see which "
                        "region runs below peak and why.")
+                mtxt = ""
+                if mx and mx.get("busy"):
+                    b = mx["busy"]
+                    mtxt = (f" Of the {_f(b)} busy compute-region cycles, {100 * mx['fma'] / b:.0f} % retire FMAs, "
+                            f"{100 * mx['load'] / b:.0f} % loads, {100 * mx['store'] / b:.1f} % stores, "
+                            f"{100 * (mx['other'] + mx['fp_other']) / b:.0f} % other instructions (loop control, "
+                            f"address math, fmv) and {100 * mx['stall'] / b:.0f} % retire nothing (stalls).")
                 ev = ("; ".join(parts) + ".") if parts else (
                     "No per-region flop counters (no PC markers, or the ce_marker probe was off): this is the busy "
                     "time beyond the ideal Ci × N_CE, not split by region.")
                 add(sev, f"Compute runs below peak: {pct:.1f} % of the CE-cycles lost inside compute regions",
-                    ev + (f" {gtxt}." if gtxt else ""), act, "Code regions · all CEs",
+                    ev + mtxt + (f" {gtxt}." if gtxt else ""), act, "Code regions · all CEs",
                     _ref(srcs, "ce_marker"), pct, g, kn)
 
     # ------------------------------------------------------------------ overlap health (what is working)

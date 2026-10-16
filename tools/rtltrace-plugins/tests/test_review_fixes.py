@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 import redefine_common as rc  # noqa: E402
+import redefine_metrics  # noqa: E402
 import test_redefine_metrics as trm  # noqa: E402
 import test_view  # noqa: E402
 from redefine_findings import CRIT, findings  # noqa: E402
@@ -102,6 +103,53 @@ class FindingsFixes(unittest.TestCase):
         self.assertTrue(any("descriptor(s) overwritten" in t for t in crit), crit)
         self.assertTrue(any("TileLink error" in t for t in crit), crit)
         self.assertTrue(any("Low L1-D hit rate on CE0" in x["title"] for x in f))
+
+
+class InstructionMix(unittest.TestCase):
+    def test_inst_class(self):
+        c = {n: i for i, n in enumerate(rc.MIX_CLASSES)}
+        cases = {0x509ef543: "fma",  # fmadd.s
+                 0x5a8f7f4b: "fma",  # fnmsub.s
+                 0x0007a287: "load",  # flw
+                 0x0006a703: "load",  # lw
+                 0x00062227: "store",  # fsw
+                 0x00a62023: "store",  # sw
+                 0x4208: "load",  # c.lw
+                 0xe208: "store",  # c.fsw
+                 0x0691: "other",  # c.addi
+                 0x20f78553: "other",  # fmv.s (fsgnj.s)
+                 0x0007f553: "fp_other",  # fadd.s
+                 0x48000013: "other"}  # a PC marker nop
+        for w, name in cases.items():
+            self.assertEqual(rc.inst_class(w), c[name], hex(w))
+
+    def test_mix_index_ranges(self):
+        lg = rc.MixLog(cls=bytearray([1, 3, 3, 0, 1, 4]))
+        ix = rc.MixIndex(lg)
+        self.assertEqual(ix.delta(0, 6), {"other": 1, "fma": 2, "fp_other": 0, "load": 2, "store": 1})
+        self.assertEqual(ix.delta(1, 4), {"other": 1, "fma": 0, "fp_other": 0, "load": 2, "store": 0})
+        self.assertEqual(ix.delta(4, 99)["store"], 1)  # clamped to the stream
+
+    def test_phase_stats_mix_and_stall_cycles(self):
+        ix = rc.MixIndex(rc.MixLog(cls=bytearray([1, 1, 3, 0] * 5)))
+        segs = [rc.PhaseSeg(0, 100, "R", "Busy", ("R",))]
+        st = rc.phase_stats(segs, [(0, 0, 0), (50, 20, 20)], 0, 100, ix)["R"]
+        self.assertEqual(dict(st.mix), {"other": 5, "fma": 10, "fp_other": 0, "load": 5, "store": 0})
+        self.assertEqual(sum(st.mix.values()), st.instret)
+        mc = rc.mix_cycles(st)
+        self.assertEqual(mc["fma"], 10)
+        self.assertEqual(mc["stall"], 100 - 20)  # busy 100, 20 retired
+
+    def test_breakup_adds_up_to_the_loss(self):
+        mix = {"fma": 500.0, "fp_other": 0.0, "load": 250.0, "store": 20.0, "other": 100.0, "stall": 130.0}
+        parts = redefine_metrics.RedefineMetrics._breakup(mix, 500.0, 2000.0)
+        self.assertEqual([p["part"] for p in parts], ["load", "store", "other", "stall"])
+        self.assertAlmostEqual(sum(p["ce_cycles"] for p in parts), 500)  # busy (1000) - ideal (500)
+        self.assertAlmostEqual(parts[-1]["gamma_e_if_removed"], 1.0 * 500 / (2000 - 500))
+        # T_ops that does not match the retired FMAs shows up as its own part, keeping the sum exact
+        parts = redefine_metrics.RedefineMetrics._breakup({**mix, "fma": 600.0}, 500.0, 2000.0)
+        self.assertEqual(parts[-1]["part"], "fma_vs_t_ops")
+        self.assertAlmostEqual(parts[-1]["ce_cycles"], 100)
 
 
 if __name__ == "__main__":

@@ -154,8 +154,9 @@ class PhasePlugins(unittest.TestCase):
                 "json": str(self.d / "m.json"), "dma_json": str(self.d / "d.json"), "t_ops": "200", **args}
         s = open_trace([str(log)], plugins=[str(PLUGINS / p) for p in plugins], plugin_args=args,
                        warn=lambda *_: None)
+        self.sections = []
         for p in s.plugins.active:
-            p.report(s.model)
+            self.sections += p.report(s.model) or []
         return s
 
     def test_probe_phases_and_waterfall(self):
@@ -186,6 +187,24 @@ class PhasePlugins(unittest.TestCase):
         self.assertEqual(wf["CEs suspended (waiting on DMA, sync, ...)"], 20)
         self.assertEqual(wf["ideal (Ci x N_CE)"], 100)  # T_ops 200 / 2
         self.assertEqual(wf["busy in DMA"], 20)
+
+    def test_waterfall_table_sums_to_100_without_the_ideal(self):
+        lines = [ce(0, 1, IDLE), ce(1, 1, IDLE), ce(0, 100, BUSY), ce(0, 250, IDLE),
+                 ce(1, 150, BUSY), ce(1, 260, SUSP), ce(1, 280, BUSY), ce(1, 300, IDLE),
+                 mark("core", 131, 0x7e0, 10, 0), mark("core", 231, 0x7e1, 110, 200),
+                 mark("core_1", 160, 0x7e0, 0, 0), mark("core_1", 260, 0x7e1, 50, 100)]
+        self.trace(lines)
+        sec = {s.title: s for s in self.sections}
+        wf = sec["Where the CE-cycles went (γe waterfall)"]
+        self.assertFalse(any("ideal" in str(r[1]).lower() for r in wf.rows))
+        *losses, total = wf.rows
+        self.assertEqual(total[1], "Total lost CE-cycles")
+        self.assertAlmostEqual(sum(r[3] for r in losses), 100, places=1)
+        self.assertEqual(total[2], sum(r[2] for r in losses))
+        u = {r[1].split(":")[0]: r for r in sec["γe: useful work vs lost CE-cycles"].rows}
+        self.assertEqual(u["Useful work at peak"][2], 100)  # T_ops 200 / 2
+        self.assertEqual(u["All CE-cycles"][2], total[2] + 100)  # lost + useful = N_CE x Co
+        self.assertAlmostEqual(u["Useful work at peak"][4], 0.25, places=3)  # gamma_e = 100 / 400
 
     def test_commit_log_fallback(self):
         # No ce_marker probe: markers come from commit lines, 1000 cycles earlier than @RT time.

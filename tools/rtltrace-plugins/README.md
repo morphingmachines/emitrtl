@@ -178,7 +178,7 @@ rtltrace is found through `--rtltrace`, `$RTLTRACE_DIR`, or the `rtltrace` direc
 |---|---|
 | `launch` | `launch.py`, or a `launches-*.json` kept by `build.py` |
 | `params` | `parameters.md` of the simulated RTL config |
-| `log` | Raw sim log. Decoded commit lines (spike-dasm output, `… inst=[..] fmadd.s …`), when present, cross-check T_ops and are the fallback source of PC markers. Raw `DASM(…)` commit lines are not decoded and are ignored (the `ce_marker` counters are used instead). |
+| `log` | Raw sim log. Decoded commit lines (spike-dasm output, `… inst=[..] fmadd.s …`), when present, cross-check T_ops and are the fallback source of PC markers. Raw `DASM(…)` commit lines are not used for the T_ops check or the marker fallback (the `ce_marker` counters are), but their instruction words give the loads / stores / FMAs split of the compute regions. |
 | `elf`, `markers` | Where to look for `*pc_markers*.h` / an explicit list of marker headers (`a.h,b.h`) |
 | `regions` | `kernel_sections.json` when rtltrace was not given `--regions` |
 | `json` | Write the metrics summary here |
@@ -301,7 +301,9 @@ has finished for good). LLC CMU commands (flushes) inside the window are listed 
 the FMA rate inside a sub-window (needs instret/flops counters: the `ce_marker` probe or the commit log).
 
 The **waterfall** splits the N_CE × Co CE-cycles into: CEs idle/launching → CEs suspended → busy in each non-compute
-region (DMA issue, runtime, untagged) → compute regions below peak → ideal (Ci × N_CE). Each row gives the γe reached
+region (DMA issue, runtime, untagged) → compute regions below peak (split into loads, stores, other instructions
+and cycles with nothing retired when `log=` has the commit lines; the FMA instructions are the ideal). The loss rows add up to 100 % of the lost
+CE-cycles; the ideal (Ci × N_CE, useful work, share = γe) is shown in a separate table. Each row gives the γe reached
 if that loss and the ones above it were removed. A region counts as compute when it retires ≥ 0.1 flops/cycle
 (override with `compute=REGION,...`).
 

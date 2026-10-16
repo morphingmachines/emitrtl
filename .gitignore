@@ -347,6 +347,4 @@ project/**/metals.sbt
 project/metals.sbt
 
 *.pyc
-__pycache__/*
-tools/rtltrace/rtltrace/__pycache__/*
-tools/rtltrace/tests/__pycache__/*
+__pycache__/

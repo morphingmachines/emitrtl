@@ -224,6 +224,15 @@ GLOSSARY = {
     "φ (memory penalty index)": ("off-chip bytes ÷ on-chip memory M_i.", "How many LLC-fulls of data moved.", "phi"),
     "M_i": ("On-chip memory: LLC bytes × CRs.", "", "M_i"),
     "CE-cycles": ("N_CE × Co: one per CE per cycle of the kernel window.", "", ""),
+    "% of lost CE-cycles": ("This row's share of all CE-cycles that were not ideal useful work (the rows add up to "
+                            "100 %).", "'% of all CE-cycles' is the share of N_CE × Co; the ideal, useful work is "
+                            "the remaining part, and its share is γe.", ""),
+    "FMA instructions": ("Fused multiply-add instructions retired (fmadd/fmsub/fnmsub/fnmadd): the useful work. "
+                         "Other FP arithmetic = fadd/fsub/fmul/fdiv/fsqrt.",
+                         "One cycle each on the single-issue CE. Loads, stores and other instructions (loop control, "
+                         "address math, fmv, the marker nops) take the remaining issue slots.", ""),
+    "no instruction retired": ("Busy cycles in which the CE retired nothing: stalls (load-use, FP latency, "
+                               "scratchpad or cache waits, fences).", "Busy minus all retired instructions.", ""),
     "γe if removed": ("γe reached if this loss and every loss above it were eliminated.",
                       "The jump from the previous row is what fixing this loss is worth.", "gamma_e_if_removed"),
     "setup / steady / tail": ("setup = until every CE is active; steady = all CEs active; tail = after the first CE "
@@ -316,6 +325,15 @@ def legend(*terms: str) -> dict[str, str]:
         m, how, _ = GLOSSARY[t]
         out[t] = f"{m} {how}".strip()
     return out
+
+
+# Parts of the below-peak loss (redefine_metrics._breakup) and of the compute-region busy cycles.
+MIX_PARTS = {
+    "load": "load instructions", "store": "store instructions",
+    "other": "other instructions (loop control, address math, fmv, markers)",
+    "fp_other": "other FP arithmetic (fadd, fmul, ...)", "stall": "no instruction retired (stalls)",
+    "fma_vs_t_ops": "FMA instructions retired minus T_ops ÷ 2 (declared work differs)"}
+MIX_PARTS_ALL = {"fma": "FMA instructions (useful work)", **{k: v for k, v in MIX_PARTS.items() if k != "fma_vs_t_ops"}}
 
 
 # ---------------------------------------------------------------------------------------------- name functions

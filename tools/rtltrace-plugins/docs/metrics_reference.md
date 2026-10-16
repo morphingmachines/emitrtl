@@ -326,7 +326,7 @@ The header lines of `summary.md`.
 | CEs idle | waterfall row "CEs idle / launching" ≥ 3 %. Adds "(serial setup)" when the setup phase is ≥ 10 % of the kernel with < 1.5 CEs active on average | major if ≥ 10 %, else minor |
 | CEs suspended | waterfall row ≥ 3 %. The diagnosis comes from the overlap tables: "DMA not overlapped" (compute with DMA underneath < 20 %), "the shared CR-DMA cannot keep up" (demand ÷ capacity > 1), "data arrives late" (ready < 80 %). Without overlap data: "DMA latency-bound" (most common `dma_gate` reason is `waitGetD` and < 1.5 requests in flight) | as above |
 | Busy in a region | a non-compute region's busy time ≥ 3 % (LLC flush, DMA calls, frame management, other) | as above |
-| Compute below peak | the waterfall's below-peak row ≥ 3 %, with each compute region's flops/cycle as % of peak. Without per-region counters the evidence says so and the action is to add PC markers | as above |
+| Compute below peak | the waterfall's below-peak row ≥ 3 %, with each compute region's flops/cycle as % of peak and, when the instruction mix is known, the busy cycles by instruction type and the issue-slot cap (FMAs ÷ retired instructions, as % of peak: 57 % for dmaMatmul). Without per-region counters the evidence says so and the action is to add PC markers | as above |
 | Double buffering in place | ≥ 50 % of compute has a transfer underneath and no race was found | info |
 | First-touch LLC misses | a `GlobalData*` section with ≥ 64 LLC accesses and ≥ 90 % misses | info |
 | Low L1-D hit rate | a CE with ≥ 1,000 L1-D accesses and < 90 % hits | minor |
@@ -458,16 +458,19 @@ The header lines of `summary.md`.
 
 ### 6.1 Where the CE-cycles went (γe waterfall)
 
-**Summary.** The (CEs in the trace) × Co CE-cycles are split into losses, ending with the ideal Ci × N_CE (useful work). The
-rows, top to bottom:
+**Summary.** The (CEs in the trace) × Co CE-cycles are split into the ideal Ci × N_CE (useful work) and the losses.
+The table lists the losses only, and its "% of lost CE-cycles" column adds up to 100 %. A second table under it
+shows the useful work separately: its share of all CE-cycles is γe. The loss rows, top to bottom:
 1. CEs idle / launching
 2. CEs suspended
 3. busy in each non-compute region (largest first)
-4. compute below peak
-5. ideal
+4. compute below peak, shown as its parts when the commit lines of the sim log are available (loads, stores, other
+   instructions, other FP arithmetic, no instruction retired; see "Instruction types" below)
+then a "Total lost CE-cycles" row. The JSON keeps the ideal as the last waterfall row (`ideal (Ci x N_CE)`).
 
-**γe if removed** for a row = ideal ÷ (CEs × Co − this loss − every loss above it). The jump from one row to the
-next is what removing that loss is worth.
+**% of lost CE-cycles** = row ÷ (all CE-cycles − ideal). **% of all CE-cycles** = row ÷ (CEs × Co); this is the
+share the findings quote ("23.5 % of the CE-cycles"). **γe if removed** for a row = ideal ÷ (CEs × Co − this loss −
+every loss above it). The jump from one row to the next is what removing that loss is worth.
 
 **Detail.**
 - **Idle / launching and suspended:** CE-cycles in `CeState` Idle + PreLaunch + Launch, and in Suspended, inside
@@ -477,6 +480,23 @@ next is what removing that loss is worth.
 - **Compute regions:** regions that retire at least 0.1 flops per busy cycle, or the `compute=` list.
 - **Compute below peak** = busy cycles in the compute regions − ideal, never below 0 (an ideal above the
   measured compute time means T_ops or N_CE is wrong; the γe > 1 warning says so).
+  Without the commit lines of the sim log (`log=`) the row stays one row, labelled "load, store and loop operations"
+  when the compute regions as a whole are instruction-limited (IPC ≥ 0.6, flops/cycle < 60 % of peak), else "compute
+  below peak". The JSON step name stays `compute below peak (...)`; the parts are its `breakup`, and `mix` holds the
+  numbers of the next paragraph.
+- **Instruction types of the compute regions.** The CE retires at most one instruction per cycle, so each busy
+  cycle of a compute region is one of: an FMA (`fmadd`/`fmsub`/`fnmsub`/`fnmadd`), another FP arithmetic
+  instruction (`fadd`, `fsub`, `fmul`, `fdiv`, `fsqrt`), a load, a store, any other instruction (integer and
+  address math, loop branches, `fmv`, the marker nops themselves), or a cycle in which nothing retired (stall).
+  The classes come from the raw instruction words of the `C<n>: … [1] … inst=[…]` commit lines of the sim log
+  (32-bit and 16-bit RVC forms; the `DASM(...)` text is not needed). The k-th valid commit line of core n is the
+  instruction the CE's `instret` counter counts as k, so the marker events' `instret` values pick the instructions
+  of each region exactly. The tool checks that the marker nops sit at the instret values the `ce_marker` events
+  report (≥ 99 %, else it prints a warning and drops the mix). Cycles with nothing retired = busy cycles − retired
+  instructions.
+  The parts of the below-peak loss are then: loads + stores + other instructions + other FP arithmetic + cycles with
+  nothing retired, plus (retired FMAs − ideal) when the declared T_ops differs from the FMAs the CE retired (0 for
+  dmaMatmul: 524,288 FMAs = 1,048,576 ÷ 2). They add up to busy cycles − ideal.
 - **Ideal** = Ci × N_CE ÷ macs_per_ce = T_ops ÷ (2 × macs_per_ce), which is T_ops ÷ 2 for this build. Without
   T_ops it is the counted flops ÷ (2 × macs_per_ce).
 - Rows under 1 % are folded into "busy in N other regions".
@@ -487,16 +507,42 @@ next is what removing that loss is worth.
 
 **Example.**
 
-| row | CE-cycles | % | γe if removed |
-|---|---:|---:|---:|
-| CEs idle / launching | 438,496 | 19.9 | 524,288 ÷ (2,208,664 − 438,496) = 0.296 |
-| CEs suspended | 508,571 | 23.0 | 0.416 |
-| busy in runtime · DMA LLC→SPM call | 100,484 | 4.55 | 0.452 |
-| … LLC flush 55,311, DMA SPM→LLC call 22,870, 10 other regions 39,874 | | | |
-| compute below peak (MICRO2X8) | 1,043,058 − 524,288 = 518,770 | 23.5 | 1 |
-| ideal | 1,048,576 ÷ 2 = 524,288 | 23.7 | – |
+| row | CE-cycles | % of lost | % of all | γe if removed |
+|---|---:|---:|---:|---:|
+| CEs idle / launching | 438,496 | 26.0 | 19.9 | 524,288 ÷ (2,208,664 − 438,496) = 0.296 |
+| CEs suspended | 508,571 | 30.2 | 23.0 | 0.416 |
+| busy in runtime · DMA LLC→SPM call | 100,484 | 5.97 | 4.55 | 0.452 |
+| … LLC flush 55,311, DMA SPM→LLC call 22,870, 10 other regions 39,874 | | | | |
+| MICRO4X4: load instructions | 274,432 | 16.3 | 12.4 | 0.682 |
+| MICRO4X4: store instructions | 16,384 | 0.97 | 0.74 | 0.697 |
+| MICRO4X4: other instructions (loop control, address math, fmv, markers) | 105,728 | 6.28 | 4.79 | 0.811 |
+| MICRO4X4: no instruction retired (stalls) | 122,226 | 7.26 | 5.53 | 1 |
+| (these four together = compute below peak: 1,043,058 − 524,288) | 518,770 | 30.8 | 23.5 | |
+| **Total lost** | **1,684,376** | **100** | **76.3** | |
 
-The rows add up to 2,208,664 CE-cycles.
+Shown separately ("γe: useful work vs lost CE-cycles"):
+
+| part | CE-cycles | % of all CE-cycles |
+|---|---:|---:|
+| **Useful work at peak: ideal = 1,048,576 ÷ 2 = 524,288 → γe = 0.2374** | 524,288 | 23.7 |
+| Lost (table above) | 1,684,376 | 76.3 |
+| All CE-cycles (N_CE × Co) | 2,208,664 | 100 |
+
+Shown separately as well ("Compute regions: busy cycles by instruction type"), the busy cycles of the compute
+regions split by what the CE retired (the FMA row is the ideal; the others are the parts of the loss above):
+
+| part | CE-cycles | % of busy cycles |
+|---|---:|---:|
+| FMA instructions (useful work) | 524,288 | 50.3 |
+| load instructions | 274,432 | 26.3 |
+| store instructions | 16,384 | 1.57 |
+| other instructions (loop control, address math, fmv, markers) | 105,728 | 10.1 |
+| no instruction retired (stalls) | 122,226 | 11.7 |
+| busy cycles in MICRO4X4 | 1,043,058 | 100 |
+
+Check: 524,288 + 274,432 + 16,384 + 105,728 = 920,832 = the region's retired instructions (IPC 0.883 × 1,043,058).
+The chapter "Code regions" has the same split for every region ("Busy cycles by instruction type · all CEs"); the
+runtime regions are mostly "no instruction retired" (e.g. the LLC flush: 55,306 of 55,311 cycles).
 
 ### 6.2 CE state per CE
 
@@ -572,7 +618,7 @@ The rows add up to 2,208,664 CE-cycles.
   5. **instruction-limited:** flops/cycle < 60 % of peak
   6. otherwise **compute-bound**
 
-**Example.** MICRO2X8, all CEs:
+**Example.** MICRO4X4, all CEs:
 
 | Value | Computation |
 |---|---|
@@ -854,7 +900,7 @@ covered:
 - the window, Co, Ci, γe and kernel time
 - D_D in / out / before / after, ρ and φ, every by-section row and every requester row
 - busy / suspended cycles per CE and the phase boundaries
-- busy / instructions / flops / IPC of MICRO2X8, the DMA call, suspend and flush regions
+- busy / instructions / flops / IPC of MICRO4X4, the DMA call, suspend and flush regions
 - the waterfall's idle, suspended and below-peak rows
 - the T_ops check
 - the DMA request statistics and engine throughput (Gets, Puts, bytes, in flight, active, gap, latency), the
@@ -895,3 +941,4 @@ These are the choices behind the numbers. They are reasonable defaults, but a re
 | 19 | **T_ops check** is skipped when only some kernels declare T_ops | the retired count covers all kernels | a warning says so |
 | 20 | **`compute=`** takes region names. In redefine_metrics and overlap_metrics a number there is ignored, and names that match no region give a warning (overlap_metrics then falls back to the regions that retire flops). ce_phases still reads a lone number as its `compute_frac=` threshold, the old spelling | `compute=0.6` was read as a region list and blamed every region | use `compute_frac=` for the threshold |
 | 21 | **`dma_overflow` / `dma_error`** are correctness findings | a lost descriptor or an error response means the kernel's data is wrong | none fired in dmaMatmul or Fib |
+| 22 | **Instruction types** come from the raw instruction word of each `[1]` commit line (opcode and RVC decode in `inst_class`), not from the `DASM(...)` text, and one retired instruction = one busy cycle (single-issue core); the rest of the busy cycles are "no instruction retired" | the sim log carries only undecoded `DASM(...)` text, and the decoded-text paths (T_ops check, MPKI) stay as they were | the mix is skipped, with a warning, for multi-CR traces and when the marker nops are not at the instret values the `ce_marker` events report. `mfence`/atomics/CSR instructions count as "other" |

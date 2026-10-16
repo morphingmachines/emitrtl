@@ -13,6 +13,7 @@ import importlib.util
 import json
 import re
 import sys
+from array import array
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,6 +178,88 @@ def _commit_log(path: str, _size: int, _mtime_ns: int) -> dict[int, CoreLog] | N
                 c.int_mul += 1
     for core, c in cores.items():
         c.samples.append((c.last, c.retired, c.flops))
+    return dict(sorted(cores.items())) or None
+
+
+# Instruction classes of the commit stream (index = value stored per retired instruction).
+MIX_CLASSES = ("other", "fma", "fp_other", "load", "store")
+_OTHER, _FMA_I, _FP1_I, _LOAD, _STORE = range(5)
+_COMMIT_ANY = re.compile(r"^C(\d+):\s+\d+\s+\[1\].*?inst=\[([0-9a-f]+)\]")
+
+
+def inst_class(w: int) -> int:
+    """Class of one RISC-V instruction word (32-bit, or 16-bit RVC when the low two bits are not 11):
+    fused multiply-add (fmadd/fmsub/fnmsub/fnmadd), other FP arithmetic (fadd/fsub/fmul/fdiv/fsqrt), load, store,
+    else other (integer, branches, fmv/compare/convert, CSR, the PC-marker nops)."""
+    if w & 3 == 3:
+        op = w & 0x7f
+        if op in (0x03, 0x07):
+            return _LOAD
+        if op in (0x23, 0x27):
+            return _STORE
+        if op in (0x43, 0x47, 0x4b, 0x4f):
+            return _FMA_I
+        if op == 0x53 and (w >> 27) in (0, 1, 2, 3, 0b01011):
+            return _FP1_I
+        return _OTHER
+    quad, f3 = w & 3, (w >> 13) & 7
+    if quad in (0, 2):  # c.lw / c.flw (c.ld) / c.fld and c.lwsp ...; c.sw / c.fsw (c.sd) / c.fsd and c.swsp ...
+        if f3 in (1, 2, 3):
+            return _LOAD
+        if f3 in (5, 6, 7):
+            return _STORE
+    return _OTHER
+
+
+@dataclass
+class MixLog:
+    """Instruction classes of the valid commits of one core, in retirement order (index = the CE's instret
+    counter), and where its PC-marker nops are."""
+    cls: bytearray = field(default_factory=bytearray)
+    markers: list = field(default_factory=list)  # (index, imm)
+
+
+class MixIndex:
+    """Prefix sums of MixLog.cls: instructions of each class among the instret range [a, b)."""
+
+    def __init__(self, log: MixLog):
+        self.n = len(log.cls)
+        self.cum = []
+        for k in range(len(MIX_CLASSES)):
+            acc, run = array("I", [0]), 0
+            for c in log.cls:
+                run += c == k
+                acc.append(run)
+            self.cum.append(acc)
+
+    def delta(self, a: int, b: int) -> dict[str, int]:
+        a, b = max(0, min(a, self.n)), max(0, min(b, self.n))
+        return {name: self.cum[k][b] - self.cum[k][a] for k, name in enumerate(MIX_CLASSES)}
+
+
+def commit_mix(path: str) -> dict[int, MixLog] | None:
+    """Per core: the class of every valid (`[1]`) commit line of a sim log, from the raw instruction word (the
+    DASM(...) text does not need to be decoded). Cached like commit_log."""
+    st = Path(path).stat()
+    return _commit_mix(str(path), st.st_size, st.st_mtime_ns)
+
+
+@functools.lru_cache(maxsize=4)
+def _commit_mix(path: str, _size: int, _mtime_ns: int) -> dict[int, MixLog] | None:
+    cores: dict[int, MixLog] = defaultdict(MixLog)
+    with open(path, errors="replace") as f:
+        for line in f:
+            if line[:1] != "C":
+                continue
+            mt = _COMMIT_ANY.match(line)
+            if not mt:
+                continue
+            c = cores[int(mt.group(1))]
+            w = int(mt.group(2), 16)
+            imm = is_marker(w)
+            if imm:
+                c.markers.append((len(c.cls), imm))
+            c.cls.append(inst_class(w))
     return dict(sorted(cores.items())) or None
 
 
@@ -514,6 +597,7 @@ class PhaseStats:
     instret: int = 0
     flops: int = 0
     counted: bool = False  # instret/flops known for this region
+    mix: Counter = field(default_factory=Counter)  # instruction class (MIX_CLASSES) -> retired in the region
 
     @property
     def total(self) -> float:
@@ -524,9 +608,11 @@ class PhaseStats:
         return self.cycles.get("Busy", 0)
 
 
-def phase_stats(segs: list[PhaseSeg], points: list[tuple[float, int, int]], w0: float, w1: float) -> dict[str, PhaseStats]:
+def phase_stats(segs: list[PhaseSeg], points: list[tuple[float, int, int]], w0: float, w1: float,
+                mix: "MixIndex | None" = None) -> dict[str, PhaseStats]:
     """Per-label cycles (by CeState) inside [w0, w1], and the instret/flops deltas between consecutive counter points
-    (marker samples, commit-log samples) charged to the label active at the start of each interval."""
+    (marker samples, commit-log samples) charged to the label active at the start of each interval. With `mix`
+    (the CE's MixIndex) the retired instructions of each interval are also counted by class."""
     out: dict[str, PhaseStats] = defaultdict(PhaseStats)
     for s in segs:
         c = _overlap(s.t0, s.t1, w0, w1)
@@ -546,7 +632,20 @@ def phase_stats(segs: list[PhaseSeg], points: list[tuple[float, int, int]], w0: 
         st.instret += round(f * (ib - ia))
         st.flops += round(f * (fb - fa))
         st.counted = True
+        if mix is not None:
+            for name, n in mix.delta(ia, ib).items():
+                st.mix[name] += round(f * n)
     return dict(out)
+
+
+def mix_cycles(st: PhaseStats) -> dict[str, float] | None:
+    """Busy cycles of a region by what the CE retired: one cycle per retired instruction (the CE retires at most one
+    per cycle), classes from MIX_CLASSES, and `stall` = busy cycles in which nothing retired. None without a mix."""
+    if not st.mix:
+        return None
+    out = {k: float(st.mix.get(k, 0)) for k in MIX_CLASSES}
+    out["stall"] = max(0.0, st.busy - sum(out.values()))
+    return out
 
 
 def _unwrapped(points) -> list[tuple[float, int, int]]:
@@ -624,6 +723,39 @@ def classify(st: PhaseStats, flops_per_cycle_peak: float, th: dict) -> str:
 _PHASE_CACHE: dict = {}
 
 
+def _mix_indexes(args: dict, marks: dict, timelines: dict, warnings: list[str]) -> dict:
+    """MixIndex per CE key, from the commit lines of log= (single-CR traces). A core is used only when its marker
+    nops sit at the instret values the markers report, i.e. the commit stream and the CE's counter agree."""
+    if not args.get("log"):
+        return {}
+    try:
+        logs = commit_mix(args["log"])
+    except OSError:
+        return {}
+    if not logs:
+        return {}
+    keys = {ce_key(inst) for inst in timelines} - {None}
+    prefixes = {k[0] for k in keys}
+    if len(prefixes) != 1:
+        warnings.append("instruction mix (loads / stores / FMAs) needs a single-CR trace: not computed")
+        return {}
+    prefix = prefixes.pop()
+    out = {}
+    for core, lg in logs.items():
+        k = (prefix, core)
+        mk = [x for x in marks.get(k, []) if x.instret is not None]
+        if k not in keys or not mk:
+            continue
+        at = dict(lg.markers)  # instret before the marker -> immediate
+        ok = sum(at.get(x.instret) == x.imm for x in mk)
+        if ok < 0.99 * len(mk):
+            warnings.append(f"{ce_label(k)}: the commit lines of log= do not line up with the CE's instret counter "
+                            f"({ok} of {len(mk)} markers); instruction mix not computed")
+            continue
+        out[k] = MixIndex(lg)
+    return out
+
+
 def phase_analysis(m, args: dict, timelines: dict, warnings: list[str]) -> dict:
     """Markers (probe, else commit log), names and per-CE phase segments; shared by the plugins of one run."""
     ck = (id(m), args.get("log"), args.get("markers"), args.get("launch"), args.get("elf"))
@@ -652,12 +784,14 @@ def phase_analysis(m, args: dict, timelines: dict, warnings: list[str]) -> dict:
         mk = marks.get(k, [])
         phases[k] = build_phases(tl, mk, names, problems)
         points[k] = sorted([(x.t, x.instret, x.flops) for x in mk if x.instret is not None] + samples.get(k, []))
+    mixes = _mix_indexes(args, marks, timelines, w) if source else {}
     for what, n in problems.items():
         w.append(f"PC markers: {n} × {what}")
     if source and not names:
         w.append("no marker names (pass markers=<pc_markers.h,...>): regions are shown by id")
     res = {"source": source, "names": names, "headers": [str(h) for h in hdrs], "phases": phases, "points": points,
-           "marks": marks, "warnings": w}  # marks: per CE key, from the probe or the commit log (not JSON)
+           "marks": marks, "mix": mixes,  # marks, mix: per CE key (the probe or commit log marks, MixIndex); not JSON
+           "warnings": w}
     _PHASE_CACHE[ck] = res
     warnings.extend(x for x in w if x not in warnings)
     return res

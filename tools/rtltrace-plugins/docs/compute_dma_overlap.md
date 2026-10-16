@@ -15,7 +15,7 @@ worker's strip loop):
 
 ```c
 fetchChunk(wakeUp, W, k + K_CHUNK, col, wNext);  // PCM_LLC2SPM: shared2spm -> one CR-DMA request, 1 KB
-multiplyChunk(aPiece, k, wCur, zCur, 1);         // PCM_MICRO2X8: compute on the other buffer
+multiplyChunk(aPiece, k, wCur, zCur, 1);         // PCM_MICRO4X4: compute on the other buffer
 re_suspend();                                    // CE_SUSPEND: sleep until the request is done
 swap = wCur, wCur = wNext, wNext = swap;
 ```
@@ -60,7 +60,7 @@ sequenceDiagram
   Note over CE: BEGIN rt.DMA_LLC2SPM (shared2spm)
   CE->>OR: frame alloc, bind, 13 operand writes, re_lock
   Note over CE: END rt.DMA_LLC2SPM = issued
-  Note over CE: compute region (MICRO2X8)
+  Note over CE: compute region (MICRO4X4)
   Note over OR: waits while the next slot holds another CE's request
   OR->>DMA: descriptor into the next slot = dma_queued
   DMA->>DMA: next → exec = dma_start
@@ -105,7 +105,7 @@ flowchart LR
    and `CeState`. The stack clears when the CE goes Idle or starts a new hyperOp.
 2. **Compute regions** are the regions that retire at least 0.1 flops per Busy cycle over all CEs. The flops
    come from the counters carried by the markers. Alternatively, name them with
-   `--plugin-arg compute=MICRO2X8,...`. In dmaMatmul only MICRO2X8 qualifies (1.005 flops/cycle); every other
+   `--plugin-arg compute=MICRO4X4,...`. In dmaMatmul only MICRO4X4 qualifies (1.005 flops/cycle); every other
    region retires 0.
 3. **C** = the cycles where the innermost open region is a compute region and the CE is Busy.
 
@@ -237,12 +237,12 @@ This is CE1's 11th prefetch iteration (`overlap_xcheck.py --example CE1:10` prin
 | 140,743 | Busy: woken for this iteration | CE0's request is transferring (140,640 → 141,351) |
 | 140,762 | BEGIN `rt.DMA_LLC2SPM`, `shared2spm` for chunk *k+1* | CE2's and CE3's requests are waiting in the Orchestrator |
 | 140,942 | END `rt.DMA_LLC2SPM` → **issued**. The call took 180 cycles: frame alloc 3, frame bind 9, operand writes and `re_lock` 168 | |
-| 140,944 | BEGIN MICRO2X8 | |
+| 140,944 | BEGIN MICRO4X4 | |
 | 141,357 | | CE2's transfer (711 cycles) |
 | 142,074 | | CE3's transfer (714 cycles) |
 | 142,227 | | CE1's request enters the *next* slot (`dma_queued`) |
 | 142,794 | | CE1's transfer starts (`dma_start`) |
-| 142,991 | END MICRO2X8 (2,047 cycles), `re_suspend` | |
+| 142,991 | END MICRO4X4 (2,047 cycles), `re_suspend` | |
 | 142,996 | Suspended | |
 | 143,508 | | `dma_done`: **data arrived** |
 | 143,529 | Busy (wake-up 21) | |
@@ -295,13 +295,13 @@ to the plugin or to the Perfetto export that breaks the agreement fails the test
 
 Open `<stem>.perfetto.json` and pin these tracks for one CE:
 
-1. *CE code regions (PC_MARK) › CE1*: MICRO2X8 slices, each preceded by *runtime · DMA LLC→SPM call*.
+1. *CE code regions (PC_MARK) › CE1*: MICRO4X4 slices, each preceded by *runtime · DMA LLC→SPM call*.
 2. *CE ↔ DMA overlap › CE1 DMA*: each request as *LLC2SPM waiting for engine* (from its issue time) followed by
    *LLC2SPM transfer 1024 B*.
 3. *CE1 ↔ Orchestrator interface › CE state*.
 4. *CR-DMA requests › requests*: the engine, one request at a time, labelled with the CE.
 
-Overlap is the DMA lane running under a MICRO2X8 slice. Exposed time is the part of the transfer to the right of
+Overlap is the DMA lane running under a MICRO4X4 slice. Exposed time is the part of the transfer to the right of
 the slice's end, where CE state shows Suspended. Clicking a slice shows its start and duration; dragging across a
 range lists the slices in it with their total durations.
 

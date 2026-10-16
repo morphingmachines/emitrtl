@@ -49,10 +49,10 @@ from rtltrace.plugin import Plugin, RtlName, Section
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import redefine_vocab as V  # noqa: E402
-from redefine_common import (IDLE_STATES, Kernel, Names, _overlap, _r, _ratio, _region, ce_label,  # noqa: E402
-                             ce_timelines, cmu_spans, compute_arg, count_retired, counters_in, is_data_section,
-                             kernel_windows, load_workload, parse_params, phase_analysis, phase_stats, plugin_regions,
-                             publish, section_of, sub_windows, window_kernels)
+from redefine_common import (IDLE_STATES, Kernel, Names, PhaseStats, _overlap, _r, _ratio, _region,  # noqa: E402
+                             ce_label, ce_timelines, cmu_spans, compute_arg, count_retired, counters_in,
+                             is_data_section, kernel_windows, limited_by, load_workload, mix_cycles, parse_params,
+                             phase_analysis, phase_stats, plugin_regions, publish, section_of, sub_windows, window_kernels)
 
 CMU_OPS = {0: "FLUSH line", 1: "CLEAN line", 2: "FLUSH_ALL", 3: "CLEAN_ALL", 4: "FLUSH range", 5: "CLEAN range"}
 
@@ -241,15 +241,22 @@ class RedefineMetrics(Plugin):
         n = len(ces)
         total = n * (w1 - w0)
         by_label: dict[str, Counter] = {}
+        agg: dict[str, PhaseStats] = {}  # per region over all CEs: the "limited by" of the below-peak row
         flops_label: dict[str, tuple[int, float]] = {}
         phases = self.pa["phases"] if self.pa and self.pa["source"] else {}
         idle = susp = 0.0
         if phases:
             for key, segs in phases.items():
-                for lab, st in phase_stats(segs, self._points().get(key, []), w0, w1).items():
+                for lab, st in phase_stats(segs, self._points().get(key, []), w0, w1, self.pa["mix"].get(key)).items():
                     idle += sum(st.cycles.get(x, 0) for x in IDLE_STATES)
                     susp += st.cycles.get("Suspended", 0)
                     if st.busy:
+                        a = agg.setdefault(lab, PhaseStats(counted=True))
+                        a.cycles["Busy"] += st.busy
+                        a.instret += st.instret
+                        a.flops += st.flops
+                        a.mix.update(st.mix)
+                        a.counted = a.counted and st.counted
                         by_label.setdefault(lab, Counter())["busy"] += st.busy
                         f, b = flops_label.get(lab, (0, 0.0))
                         flops_label[lab] = (f + (st.flops if st.counted else 0), b + st.busy)
@@ -299,14 +306,45 @@ class RedefineMetrics(Plugin):
         comp = sum(by_label[lab]["busy"] for lab in compute if lab in by_label)
         # never negative: an ideal above the measured compute time means T_ops or N_CE is off (γe > 1 warns)
         steps.append((f"compute below peak ({', '.join(sorted(compute))})", max(0.0, comp - ideal)))
+        tot = PhaseStats(counted=all(agg[lab].counted for lab in compute if lab in agg))
+        for lab in compute:
+            if lab in agg:
+                tot.cycles["Busy"] += agg[lab].busy
+                tot.instret += agg[lab].instret
+                tot.flops += agg[lab].flops
+                tot.mix.update(agg[lab].mix)
+        mixc = mix_cycles(tot) if tot.counted and tot.instret and sum(tot.mix.values()) else None
+        why = limited_by(tot, 2.0 * self.macs_per_ce, {"wait": 0.5, "idle_ipc": 0.05, "stall_ipc": 0.6,
+                                                        "compute": 0.6}) if tot.busy else None
         rows, left = [], total
         for name, c in steps:
             left -= c
             rows.append({"step": name, "ce_cycles": c, "pct": 100 * c / total if total else None,
                          "gamma_e_if_removed": ideal / left if left > 0 else None})
+            if name.startswith("compute below peak"):
+                rows[-1]["limited_by"] = why  # what the compute regions are limited by (ce_phases classes)
+                if mixc and c > 0:
+                    rows[-1]["mix"] = {"regions": sorted(compute), "busy": tot.busy, "instret": tot.instret, **mixc}
+                    rows[-1]["breakup"] = self._breakup(mixc, ideal, left + c)
         rows.append({"step": "ideal (Ci x N_CE)", "ce_cycles": ideal, "pct": 100 * ideal / total if total else None,
                      "gamma_e_if_removed": None})
         return rows
+
+    @staticmethod
+    def _breakup(mix: dict, ideal: float, left: float) -> list[dict]:
+        """The below-peak loss (busy cycles of the compute regions − ideal; `left` = CE-cycles not yet removed
+        before it) by instruction type: loads, stores, other
+        instructions, other FP arithmetic, cycles with no retirement, and the retired FMAs minus the ideal (0 when
+        the declared T_ops matches the FMAs the CE retired). The parts add up to the loss."""
+        parts = [("load", mix["load"]), ("store", mix["store"]), ("other", mix["other"]),
+                 ("fp_other", mix["fp_other"]), ("stall", mix["stall"]), ("fma_vs_t_ops", mix["fma"] - ideal)]
+        out = []
+        for key, c in parts:
+            if abs(c) < 0.5:
+                continue
+            left -= c
+            out.append({"part": key, "ce_cycles": c, "gamma_e_if_removed": ideal / left if left > 0 else None})
+        return out
 
     def _counters(self, m, out, proc, bt, ces):
         acc, pts = 0, [(0.0, 0)]
@@ -437,10 +475,13 @@ class RedefineMetrics(Plugin):
 
         G, b = V.G_TIME
         src = (self.pa or {}).get("source")
-        rows = []
+        rows, useful, mixrows = [], [], []
         for r in self.results:
             wf, small = [], []
+            ideal = next((w for w in r["waterfall"] if w["step"].startswith("ideal")), None)
             for w in r["waterfall"]:
+                if w is ideal:
+                    continue  # the ideal is useful work, not a loss: shown below the table
                 if w["step"].startswith("busy in ") and w["pct"] is not None and w["pct"] < 1:
                     small.append(w)
                     continue
@@ -448,24 +489,71 @@ class RedefineMetrics(Plugin):
                     wf.append(self._fold(small))
                     small = []
                 wf.append(w)
-            if small:  # small rows at the very end (no ideal row after them)
+            if small:  # small rows at the very end (the below-peak row is last when T_ops is known)
                 wf.append(self._fold(small))
-            rows += [[r["kernel"], self._step_name(w["step"]), round(w["ce_cycles"]), _r(w["pct"], 3),
-                      _r(w["gamma_e_if_removed"], 3)] for w in wf]
+            # the rows share the CE-cycles that are not ideal useful work, so they add up to 100 %
+            lost = sum(w["ce_cycles"] for w in wf)
+            total_ce = lost + (ideal["ce_cycles"] if ideal else 0)
+            for w in wf:
+                # the below-peak row is shown as its parts when the instruction mix is known
+                parts = [(self._step_name(w["step"], w.get("limited_by")), w["ce_cycles"], w["gamma_e_if_removed"])]
+                if w.get("breakup"):
+                    regs = ", ".join(V.region_name(x) for x in w["mix"]["regions"])
+                    parts = [(RtlName(f"{regs}: {V.MIX_PARTS[b['part']]}", b["part"]), b["ce_cycles"],
+                              b["gamma_e_if_removed"]) for b in w["breakup"]]
+                rows += [[r["kernel"], nm, round(c), _r(100 * c / lost, 3) if lost else None,
+                          _r(100 * c / total_ce, 3) if total_ce else None, _r(g, 3)] for nm, c, g in parts]
+            bw = next((w for w in r["waterfall"] if w.get("mix")), None)
+            if bw:
+                mx = bw["mix"]
+                regs = ", ".join(V.region_name(x) for x in mx["regions"])
+                mixrows += [[r["kernel"], regs, V.MIX_PARTS_ALL[k], round(mx[k]), _r(100 * mx[k] / mx["busy"], 3)]
+                            for k in ("fma", "fp_other", "load", "store", "other", "stall") if mx[k] >= 0.5]
+                mixrows.append([r["kernel"], regs, "Busy cycles in the compute regions", round(mx["busy"]), 100.0])
+            if lost:
+                rows.append([r["kernel"], "Total lost CE-cycles" if ideal else "Total CE-cycles", round(lost), 100.0,
+                             _r(sum(w["pct"] or 0 for w in wf), 3), None])
+            if ideal and r["gamma_e"] is not None:
+                total = lost + ideal["ce_cycles"]
+                useful += [[r["kernel"], "Useful work at peak: ideal Ci × N_CE = γe", round(ideal["ce_cycles"]),
+                            _r(ideal["pct"], 3), _r(r["gamma_e"])],
+                           [r["kernel"], "Lost (total of the table above)", round(lost),
+                            _r(100 * lost / total, 3), None],
+                           [r["kernel"], "All CE-cycles: N_CE × Co", round(total), 100.0, None]]
         no_ideal = any(r["waterfall"] and not any(w["step"].startswith("ideal") for w in r["waterfall"])
                        for r in self.results)
         out.append(Section("Where the CE-cycles went (γe waterfall)",
-                           ["kernel", "loss", "CE-cycles", "% of CE-cycles", "γe if removed"], rows,
-                           "Read top-down: each row is a loss of CE-cycles (N_CE × Co); 'γe if removed' is the "
-                           "efficiency reached if that loss and every loss above it were eliminated. "
+                           ["kernel", "loss", "CE-cycles", "% of lost CE-cycles", "% of all CE-cycles",
+                            "γe if removed"], rows,
+                           "Read top-down: each row is a loss of CE-cycles; the '% of lost CE-cycles' column adds up "
+                           "to 100 %, without the ideal (useful) cycles, which are shown separately below. "
+                           "'γe if removed' is the efficiency reached if that loss and every loss above it were "
+                           "eliminated. "
                            + (f"Busy time is split by PC-marker region (source: {src}); regions under 1 % are "
                               "folded into one row." if src else
                               "No PC markers: busy time is one row (add PC_MARK regions to split it).")
                            + (" No T_ops declared (launch.py KernelLaunch(t_ops=...)) and no flop counters: the "
                               "useful work and γe are unknown, so the busy time that may be useful is not split."
                               if no_ideal else ""),
-                           legend=V.legend("CE-cycles", "γe if removed"), group=G, order=b,
+                           legend=V.legend("CE-cycles", "% of lost CE-cycles", "γe if removed"), group=G, order=b,
                            key="REDEFINE metrics · γe waterfall (CE-cycles = N_CE x Co)"))
+        if mixrows:
+            out.append(Section("Compute regions: busy cycles by instruction type",
+                               ["kernel", "compute regions", "part", "CE-cycles", "% of busy cycles"], mixrows,
+                               "The busy CE-cycles of the compute regions split by what the CE retired: FMA "
+                               "instructions are the useful work, the other rows are what shares the single issue "
+                               "slot with them (loads, stores, loop control and address math) and the cycles in "
+                               "which nothing retired. One cycle per retired instruction; classes from the "
+                               "instruction words in the sim log's commit lines.",
+                               legend=V.legend("FMA instructions", "no instruction retired"), group=G,
+                               order=b + 0.6, key="REDEFINE metrics · compute-region cycles by instruction type"))
+        if useful:
+            out.append(Section("γe: useful work vs lost CE-cycles",
+                               ["kernel", "part", "CE-cycles", "% of all CE-cycles", "γe"], useful,
+                               "The CE-cycles the kernel's flops would need at peak (Ci × N_CE) as a share of all "
+                               "CE-cycles is the efficiency γe = Ci / Co. The rest is the lost cycles of the "
+                               "waterfall.", legend=V.legend("γe (compute efficiency)", "CE-cycles"), group=G, order=b + 0.5,
+                               key="REDEFINE metrics · γe = ideal CE-cycles / all CE-cycles"))
         rows = []
         for r in self.results:
             co = r["C_o"] or 1
@@ -514,13 +602,17 @@ class RedefineMetrics(Plugin):
                 "pct": sum(w["pct"] or 0 for w in rows), "gamma_e_if_removed": rows[-1]["gamma_e_if_removed"]}
 
     @staticmethod
-    def _step_name(step: str) -> RtlName:
+    def _step_name(step: str, limited: str | None = None) -> RtlName:
         if step.startswith("busy in ") and "other regions" not in step:
             lab = step[8:]
             return RtlName(f"busy in {V.region_name(lab)}", lab)
         if step.startswith("compute below peak ("):
             labs = step[len("compute below peak ("):-1]
-            return RtlName(f"compute below peak ({', '.join(V.region_name(x) for x in labs.split(', '))})", labs)
+            regs = ", ".join(V.region_name(x) for x in labs.split(", "))
+            # regions that retire an instruction nearly every cycle but few FMAs: the loss is the loads, stores and
+            # loop control that share the single issue slot with the FMAs
+            return RtlName(f"load, store and loop operations ({regs})" if limited == "instruction"
+                           else f"compute below peak ({regs})", labs)
         if step.startswith("ideal"):
             return RtlName("ideal: Ci × N_CE (useful work)", step)
         if step == "busy, not split":
