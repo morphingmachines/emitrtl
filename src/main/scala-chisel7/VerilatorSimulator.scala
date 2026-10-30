@@ -25,7 +25,7 @@ trait VerilatorSimulator extends TestSuite with PeekPokeAPI {
         .withTraceStyle(
           Some(
             svsim.verilator.Backend.CompilationSettings.TraceStyle(
-              svsim.verilator.Backend.CompilationSettings.TraceKind.Vcd,
+              svsim.verilator.Backend.CompilationSettings.TraceKind.Fst(),
               traceUnderscore = true
             )
           )
