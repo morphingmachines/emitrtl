@@ -14,6 +14,8 @@ import com.goyeau.mill.scalafix.ScalafixModule
 
 import $file.builddefs
 
+builddefs.ivys.checkOutDir()
+
 import $file.dependencies.cde.{build => cde_build}
 import $file.dependencies.`rocket-chip`.{common => rocketchip_common}
 import $file.dependencies.`berkeley-hardfloat`.{common => hardfloat_common}
@@ -115,7 +117,8 @@ object myhardfloat extends hardfloat_common.HardfloatModule with PublishModule {
 }
 
 object chipyardAnnotations extends builddefs.CommonModule with SbtModule {
-  override def millSourcePath = os.pwd / "dependencies" / "chipyard" / "tools" / "stage"
+  override def millSourcePath =
+    os.pwd / "dependencies" / "chipyard" / "tools" / (if (builddefs.ivys.useChisel7) "stage-chisel7" else "stage")
   override def moduleDeps     = super.moduleDeps ++ Seq(myrocketchip)
 }
  
@@ -154,6 +157,13 @@ object emitrtl
   with ScalafixModule
   with ScalacOptions {
   override def millSourcePath = os.pwd
+
+  // Chisel-version-specific sources (e.g. VerilatorSimulator), selected by USE_CHISEL7
+  override def sources = T.sources {
+    super.sources() :+ PathRef(
+      millSourcePath / "src" / "main" / (if (builddefs.ivys.useChisel7) "scala-chisel7" else "scala-chisel6")
+    )
+  }
 
   override def moduleDeps = super.moduleDeps ++ Seq(myrocketchip, chipyardAnnotations, chipyardTapeout)
 

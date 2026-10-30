@@ -8,12 +8,23 @@ import de.tobiasroeser.mill.vcs.version.VcsVersion
 
 // Global Scala Version
 object ivys {
-  val sv = "2.13.12"
-  val cv = "6.7.0"
+  // USE_CHISEL7 selects Chisel 7 (as chipyard's build.sbt); default stays on Chisel 6
+  val useChisel7 = sys.env.contains("USE_CHISEL7")
+  val sv = if (useChisel7) "2.13.18" else "2.13.12"
+  val cv = if (useChisel7) "7.13.0" else "6.7.0"
+  // Mill caches targets by code, not env: refuse to reuse an out/ built with the other Chisel.
+  // Call from the top level of build.sc so it runs on every mill invocation.
+  def checkOutDir(): Unit = {
+    val stamp = os.pwd / "out" / "chisel-version"
+    if (os.exists(stamp) && os.read(stamp) != cv)
+      sys.error(s"out/ was built with Chisel ${os.read(stamp)}; run `rm -rf out` before building with Chisel $cv")
+    os.write.over(stamp, cv, createFolders = true)
+  }
   val cv1 = "3.6.1" // chipyard.tapeout
   val sv1 = "2.13.10" // chipyard.tapeout
   // the first version in this Map is the mainly supported version which will be used to run tests
   val chiselCrossVersions = Map(
+    "7.13.0" -> (ivy"org.chipsalliance::chisel:7.13.0", ivy"org.chipsalliance:::chisel-plugin:7.13.0"),
     "6.7.0" -> (ivy"org.chipsalliance::chisel:6.7.0", ivy"org.chipsalliance:::chisel-plugin:6.7.0"),
     "3.6.1" -> (ivy"edu.berkeley.cs::chisel3:3.6.1", ivy"edu.berkeley.cs:::chisel-plugin:3.6.1") // chipyard.tapeout
   )
@@ -33,7 +44,8 @@ object ivys {
   val breeze = ivy"org.scalanlp::breeze:1.1"
   val parallel = ivy"org.scala-lang.modules:scala-parallel-collections_3:1.0.4"
   val mainargs = ivy"com.lihaoyi::mainargs:0.5.0"
-  val json4sJackson = ivy"org.json4s::json4s-jackson:4.0.5"
+  val json4sJackson =
+    if (useChisel7) ivy"io.github.json4s::json4s-jackson:4.1.0" else ivy"org.json4s::json4s-jackson:4.0.5"
   val scalaReflect = ivy"org.scala-lang:scala-reflect:${sv}"
 }
 
