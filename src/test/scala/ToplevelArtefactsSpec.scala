@@ -1,7 +1,7 @@
 package emitrtl
 
 import freechips.rocketchip.util.ElaborationArtefacts
-import org.chipsalliance.cde.config.Parameters
+import org.chipsalliance.cde.config.{Config, Parameters}
 import org.chipsalliance.diplomacy.lazymodule.{LazyModule, LazyModuleImp}
 import org.scalatest.BeforeAndAfterEach
 import org.scalatest.flatspec.AnyFlatSpec
@@ -79,5 +79,86 @@ class ToplevelArtefactsSpec extends AnyFlatSpec with Matchers with BeforeAndAfte
     Console.withErr(err)(top.chisel2firrtl())
     err.toString should include("graphml")
     os.exists(top.dir / "artefacts") shouldBe false
+  }
+}
+
+/** Top-level so `ChipyardStage` can load it by name and build it through its `Parameters` constructor. Its `l2.json`
+  * content tells an elaborated instance from one that was only built.
+  */
+class StageProducer(implicit p: Parameters) extends LazyModule {
+  private var elaborated = false
+  ElaborationArtefacts.add("l2.json", s"stage l2, elaborated=$elaborated")
+  lazy val module = new LazyModuleImp(this) {
+    elaborated = true
+    ElaborationArtefacts.add("0x2000000.0.regmap.json", "stage regmap")
+  }
+}
+
+/** The config `ChipyardStage` builds `StageProducer` with */
+class StageProducerConfig extends Config(Parameters.empty)
+
+class SynthToplevelArtefactsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterEach {
+
+  override def beforeEach(): Unit = Artefacts.drain()
+  override def afterEach():  Unit = Artefacts.drain()
+
+  private class StageTop(kinds: Seq[ArtefactKind] = Nil) extends LazyToplevel with SynthToplevel {
+    val dir                    = os.temp.dir()
+    lazy val lazyTop           = LazyModule(new StageProducer()(Parameters.empty))
+    override def out_dir       = dir.toString
+    override def configString  = "emitrtl:StageProducerConfig"
+    override def artefactKinds = kinds
+  }
+
+  private def artefacts(dir: os.Path): Map[String, String] =
+    os.list(dir / "artefacts").map(p => p.last -> os.read(p)).toMap
+
+  /** Renumbers `LazyModule` ids by first appearance; they come from a global counter, and the reflection build on the
+    * `ChipyardStage` path offsets them.
+    */
+  private def normaliseIds(graphML: String): String = {
+    val ids = scala.collection.mutable.LinkedHashMap.empty[String, Int]
+    """(id|source|target)="(\d+)""".r.replaceAllIn(
+      graphML,
+      m => s"""${m.group(1)}="${ids.getOrElseUpdate(m.group(2), ids.size + 1)}""",
+    )
+  }
+
+  "SynthToplevel.chipyardAnno" should "write graphML and every registry artefact to <out_dir>/artefacts" in {
+    val top = new StageTop
+    top.chipyardAnno()
+    val files = artefacts(top.dir)
+    files.keySet shouldBe Set("StageProducer.l2.json", "StageProducer.0x2000000.0.regmap.json", "StageProducer.graphml")
+    files("StageProducer.graphml") should include("<graphml")
+  }
+
+  it should "write each key once, from the stage's elaborated Top" in {
+    val top = new StageTop
+    top.chipyardAnno()
+    artefacts(top.dir)("StageProducer.l2.json") shouldBe "stage l2, elaborated=true"
+  }
+
+  it should "still write the legacy <out_dir>/<outFileName>.<key> files" in {
+    val top = new StageTop
+    top.chipyardAnno()
+    os.read(top.dir / "StageProducer.0x2000000.0.regmap.json") shouldBe "stage regmap"
+    os.read(top.dir / "StageProducer.l2.json") shouldBe "stage l2, elaborated=true"
+  }
+
+  it should "match the chisel2firrtl artefacts by name and content, up to graphML LazyModule ids" in {
+    val stage = new StageTop
+    stage.chipyardAnno()
+    val chisel = new StageTop
+    chisel.chisel2firrtl()
+    val (fromStage, fromChisel) = (artefacts(stage.dir), artefacts(chisel.dir))
+    fromStage.keySet shouldBe fromChisel.keySet
+    fromStage.removed("StageProducer.graphml") shouldBe fromChisel.removed("StageProducer.graphml")
+    normaliseIds(fromStage("StageProducer.graphml")) shouldBe normaliseIds(fromChisel("StageProducer.graphml"))
+  }
+
+  it should "write only the requested kinds" in {
+    val top = new StageTop(Seq(ArtefactKind.GraphML))
+    top.chipyardAnno()
+    artefacts(top.dir).keySet shouldBe Set("StageProducer.graphml")
   }
 }

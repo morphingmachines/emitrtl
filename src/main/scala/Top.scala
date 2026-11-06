@@ -5,7 +5,7 @@ import chisel3._
 import circt.stage.ChiselStage
 import freechips.rocketchip.unittest.UnitTest
 import freechips.rocketchip.util.ElaborationArtefacts
-import org.chipsalliance.diplomacy.lazymodule.LazyModule
+import org.chipsalliance.diplomacy.lazymodule.{LazyModule, LazyModuleImpLike}
 
 import java.io._
 import java.nio.file._
@@ -150,6 +150,17 @@ trait Toplevel {
 
 }
 
+object SynthToplevel {
+
+  /** The stage's root `LazyModule`, from its design's `wrapper`; `None` unless `--top-module` is a `LazyModule`.
+    * `DesignAnnotation` has 1 field on chisel6 and 2 on chisel7, so it is matched by type.
+    */
+  private def stageRoot(annos: firrtl.AnnotationSeq): Option[LazyModule] =
+    annos.collectFirst { case d: chisel3.stage.DesignAnnotation[_] => d.design }.collect {
+      case m: LazyModuleImpLike => m.wrapper
+    }
+}
+
 trait SynthToplevel { this: Toplevel =>
 
   lazy val annoArgs = Array(
@@ -167,9 +178,16 @@ trait SynthToplevel { this: Toplevel =>
   def top_mems_vFile   = s"${firtool_out_dir}/${outFileName}.top.mems.v"
   def hammer_ir_file   = s"${out_dir}/${outFileName}.mems.hammer.json"
 
+  /** Runs `ChipyardStage`, which writes `<out_dir>/<outFileName>.<key>`, then writes the artefact selection with graphML
+    * of the stage's own root. The Top is built twice, by `annoArgs` and by the stage (see ADR 0002).
+    */
   def chipyardAnno(): Unit = {
-    (new ChipyardStage).execute(annoArgs, Seq.empty)
+    // Drop the never-elaborated first build's entries so only the stage's own build reaches either output
+    val args = annoArgs
+    Artefacts.drain()
+    val annos = (new ChipyardStage).execute(args, Seq.empty)
     addHierarchy2AnnoFile(anno_file, final_anno_file)
+    emitArtefacts(SynthToplevel.stageRoot(annos))
   }
 
   // Call this only after calling chipyardAnno()
