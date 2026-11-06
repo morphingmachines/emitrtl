@@ -125,6 +125,14 @@ trait Toplevel {
     s"--output-annotation-file=${out_dir}/${outFileName}.output.anno.json",
   )
 
+  /** The artefact kinds this Top writes to `<out_dir>/artefacts`; empty selects everything. */
+  def artefactKinds: Seq[ArtefactKind] = Nil
+
+  final def artefactSelection: Seq[ArtefactKind] = artefactKinds
+
+  /** The root rendered as graphML; a plain `Toplevel` has none, so a graphML request only warns. */
+  def rootLazyModule: Option[LazyModule] = None
+
   def chisel2firrtl() = {
     val str_firrtl = ChiselStage.emitCHIRRTL(topModule, args = Array("--full-stacktrace"))
     Files.createDirectories(Paths.get(s"${out_dir}"))
@@ -132,7 +140,15 @@ trait Toplevel {
     pw.write(str_firrtl)
     pw.close()
     addHierarchy2AnnoFile(anno_file, final_anno_file)
+    emitArtefacts()
   }
+
+  /** Writes the selection from the registry, then drains it. Draining before elaboration would lose entries added
+    * while the Top is built, such as `l2.json`.
+    */
+  protected def emitArtefacts(root: Option[LazyModule] = rootLazyModule): Unit =
+    try Artefacts.emit(ElaborationArtefacts.files, root, artefactSelection, os.Path(out_dir) / "artefacts", outFileName)
+    finally Artefacts.drain()
 
   def firrtl2sv(args: Seq[String] = defaultFirtoolArgs, fpga: Boolean = false) = {
     // check additional options with "firtool --help"
@@ -235,17 +251,14 @@ trait LazyToplevel extends Toplevel {
   def lazyTop: LazyModule
   override def topModule      = lazyTop.module.asInstanceOf[chisel3.RawModule]
   override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
+  override def rootLazyModule: Option[LazyModule] = Some(lazyTop)
 
+  // Legacy path; leaves the registry untouched
   def genDiplomacyGraph() = {
-    ElaborationArtefacts.add("graphml", lazyTop.graphML)
     Files.createDirectories(Paths.get(out_dir))
-    ElaborationArtefacts.files.foreach {
-      case ("graphml", graphML) =>
-        val fw = new FileWriter(new File(s"${out_dir}", s"${lazyTop.className}.graphml"))
-        fw.write(graphML())
-        fw.close()
-      case _ =>
-    }
+    val fw = new FileWriter(new File(s"${out_dir}", s"${lazyTop.className}.graphml"))
+    fw.write(lazyTop.graphML)
+    fw.close()
   }
 
   def showModuleComposition(gen: => LazyModule) = {
