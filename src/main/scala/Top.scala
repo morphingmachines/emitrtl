@@ -38,9 +38,14 @@ package unit {
   }
 }
 
+object Toplevel {
+  /** `x`'s class name with nested-class `$` separators as `.`, e.g. `emitrtl.Spec.Producer` */
+  private[emitrtl] def dottedClassName(x: AnyRef): String = x.getClass().getName().split("\\$").mkString(".")
+}
+
 trait Toplevel {
   def topModule: chisel3.RawModule
-  def topModule_name = topModule.getClass().getName().split("\\$").mkString(".")
+  def topModule_name = Toplevel.dottedClassName(topModule)
 
   def configString: String = "None:None" // $(CONFIG_PACKAGE):$(CONFIG)
 
@@ -67,36 +72,20 @@ trait Toplevel {
       ]
       """
     def extra_anno_file = s"${out_dir}/${outFileName}.extrafirtool.anno.json"
-    os.proc(
-      "rm",
-      "-rf",
-      s"${extra_anno_file}",
-    ).call(stdout = os.Inherit)
+    val extraAnno       = os.Path(extra_anno_file)
 
-    os.write(
-      os.Path(s"${extra_anno_file}"),
-      s"${mfc_extra_anno_contents}",
-    )
+    os.remove.all(extraAnno)
+    os.write(extraAnno, mfc_extra_anno_contents)
 
-    val inAnnoFile = new File(annIn)
-
-    if (inAnnoFile.exists()) {
+    if (os.exists(os.Path(annIn, os.pwd))) {
       val jq_cmd = Seq("jq", "-s", "[.[][]]", s"${annIn}", s"${extra_anno_file}")
       println(s"LOG: command invoked \"${jq_cmd.mkString(" ")}\"")
       os.proc(jq_cmd).call(stdout = os.Path(annOut))
     } else {
-      os.proc(
-        "mv",
-        s"${extra_anno_file}",
-        s"${annOut}",
-      ).call(stdout = os.Inherit)
+      os.move(extraAnno, os.Path(annOut, os.pwd), replaceExisting = true)
     }
 
-    os.proc(
-      "rm",
-      "-rf",
-      s"${extra_anno_file}",
-    ).call(stdout = os.Inherit)
+    os.remove.all(extraAnno)
   }
 
   def mfc_lowering_options = s"emittedLineLength=2048,noAlwaysComb," +
@@ -250,7 +239,7 @@ trait SynthToplevel { this: Toplevel =>
 trait LazyToplevel extends Toplevel {
   def lazyTop: LazyModule
   override def topModule      = lazyTop.module.asInstanceOf[chisel3.RawModule]
-  override def topModule_name = lazyTop.getClass().getName().split("\\$").mkString(".")
+  override def topModule_name = Toplevel.dottedClassName(lazyTop)
   override def rootLazyModule: Option[LazyModule] = Some(lazyTop)
 
   // Legacy path; leaves the registry untouched
@@ -339,7 +328,7 @@ trait WithLazyModuleDUT { this: VerilateTestHarness with LazyToplevel =>
 trait WithUnitTestDUT { this: VerilateTestHarness with Toplevel =>
   val dut: UnitTest
   lazy val topModule          = new unit.TestHarness(dut)
-  override def topModule_name = dut.getClass().getName().split("\\$").mkString(".")
+  override def topModule_name = Toplevel.dottedClassName(dut)
 }
 
 /** To run from a terminal shell
