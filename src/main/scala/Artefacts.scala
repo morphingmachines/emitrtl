@@ -67,7 +67,8 @@ object ArtefactKind {
     * the `glob:` prefix and are never inferred from glob characters.
     */
   def parse(s: String): Either[String, Seq[ArtefactKind]] = {
-    val parsed = s.split(",").toSeq.map { token =>
+    // Limit -1 keeps trailing empty entries, so "regmap," is rejected rather than read as "regmap"
+    val parsed = s.split(",", -1).toSeq.map { token =>
       if (token.startsWith(globPrefix)) Try(ByPattern(token.stripPrefix(globPrefix))).toOption.toRight(token)
       else named.find(_.name == token.toLowerCase).toRight(token)
     }
@@ -75,7 +76,7 @@ object ArtefactKind {
     if (unknown.isEmpty) Right(parsed.collect { case Right(kind) => kind })
     else
       Left(
-        s"Unknown artefact kind(s) or malformed glob(s): ${unknown.mkString(", ")}. " +
+        s"Unknown artefact kind(s) or malformed glob(s): ${unknown.map(t => s"'$t'").mkString(", ")}. " +
           s"Valid names: ${named.map(_.name).mkString(", ")}, or $globPrefix<pattern>"
       )
   }

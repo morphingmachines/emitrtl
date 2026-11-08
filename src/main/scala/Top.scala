@@ -117,26 +117,37 @@ trait Toplevel {
   /** The artefact kinds this Top writes to `<out_dir>/artefacts`; empty selects everything. */
   def artefactKinds: Seq[ArtefactKind] = Nil
 
-  final def artefactSelection: Seq[ArtefactKind] = artefactKinds
+  /** The `EMITRTL_ARTEFACTS` value; a seam for tests, since the JVM's environment is read-only. */
+  private[emitrtl] def artefactsEnv: Option[String] = sys.env.get("EMITRTL_ARTEFACTS")
+
+  /** `artefactKinds`, replaced by a non-empty `EMITRTL_ARTEFACTS`. An empty value falls back, as a Makefile `?=`
+    * exports one. Throws `IllegalArgumentException` listing the valid names on an unknown kind.
+    */
+  final def artefactSelection: Seq[ArtefactKind] =
+    artefactsEnv
+      .filter(_.nonEmpty)
+      .map(ArtefactKind.parse(_).fold(e => throw new IllegalArgumentException(e), identity))
+      .getOrElse(artefactKinds)
 
   /** The root rendered as graphML; a plain `Toplevel` has none, so a graphML request only warns. */
   def rootLazyModule: Option[LazyModule] = None
 
   def chisel2firrtl() = {
+    val selection  = artefactSelection // validated before any Chisel work
     val str_firrtl = ChiselStage.emitCHIRRTL(topModule, args = Array("--full-stacktrace"))
     Files.createDirectories(Paths.get(s"${out_dir}"))
     val pw = new PrintWriter(new File(fir_file))
     pw.write(str_firrtl)
     pw.close()
     addHierarchy2AnnoFile(anno_file, final_anno_file)
-    emitArtefacts()
+    emitArtefacts(selection)
   }
 
   /** Writes the selection from the registry, then drains it. Draining before elaboration would lose entries added
     * while the Top is built, such as `l2.json`.
     */
-  protected def emitArtefacts(root: Option[LazyModule] = rootLazyModule): Unit =
-    try Artefacts.emit(ElaborationArtefacts.files, root, artefactSelection, os.Path(out_dir) / "artefacts", outFileName)
+  protected def emitArtefacts(selection: Seq[ArtefactKind], root: Option[LazyModule] = rootLazyModule): Unit =
+    try Artefacts.emit(ElaborationArtefacts.files, root, selection, os.Path(out_dir) / "artefacts", outFileName)
     finally Artefacts.drain()
 
   def firrtl2sv(args: Seq[String] = defaultFirtoolArgs, fpga: Boolean = false) = {
@@ -182,12 +193,13 @@ trait SynthToplevel { this: Toplevel =>
     * of the stage's own root. The Top is built twice, by `annoArgs` and by the stage (see ADR 0002).
     */
   def chipyardAnno(): Unit = {
+    val selection = artefactSelection // validated before the Top is built
     // Drop the never-elaborated first build's entries so only the stage's own build reaches either output
     val args = annoArgs
     Artefacts.drain()
     val annos = (new ChipyardStage).execute(args, Seq.empty)
     addHierarchy2AnnoFile(anno_file, final_anno_file)
-    emitArtefacts(SynthToplevel.stageRoot(annos))
+    emitArtefacts(selection, SynthToplevel.stageRoot(annos))
   }
 
   // Call this only after calling chipyardAnno()

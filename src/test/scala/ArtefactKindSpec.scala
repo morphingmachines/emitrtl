@@ -34,4 +34,9 @@ class ArtefactKindSpec extends AnyFlatSpec with Matchers {
   it should "reject a malformed glob before anything is elaborated" in {
     parse("glob:[") shouldBe a[Left[_, _]]
   }
+
+  // An empty selection means everything, so a stray comma must not silently become one
+  it should "reject empty entries" in {
+    Seq(",", "regmap,", ",regmap", "regmap,,dts").foreach(s => parse(s) shouldBe a[Left[_, _]])
+  }
 }

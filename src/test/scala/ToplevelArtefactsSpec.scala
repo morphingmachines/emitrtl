@@ -33,6 +33,26 @@ class ToplevelArtefactsSpec extends AnyFlatSpec with Matchers with BeforeAndAfte
   private def artefacts(top: DiplomacyTop): Map[String, String] =
     os.list(top.dir / "artefacts").map(p => p.last -> os.read(p)).toMap
 
+  /** A Top that sees `env` as its `EMITRTL_ARTEFACTS` value */
+  private class EnvTop(env: Option[String]) extends DiplomacyTop("a", Seq(ArtefactKind.L2)) {
+    override private[emitrtl] def artefactsEnv = env
+  }
+
+  "Toplevel.artefactSelection" should "replace artefactKinds with a non-empty EMITRTL_ARTEFACTS" in {
+    new EnvTop(Some("regmap,dts-json")).artefactSelection shouldBe Seq(ArtefactKind.Regmap, ArtefactKind.DtsJson)
+  }
+
+  it should "fall back to artefactKinds when EMITRTL_ARTEFACTS is unset or empty" in {
+    new EnvTop(None).artefactSelection shouldBe Seq(ArtefactKind.L2)
+    new EnvTop(Some("")).artefactSelection shouldBe Seq(ArtefactKind.L2)
+  }
+
+  it should "select by pattern with a glob: entry" in {
+    val Seq(kind) = new EnvTop(Some("glob:*.l2.json")).artefactSelection
+    kind.matches("bank0.l2.json") shouldBe true
+    kind.matches("l2.json") shouldBe false
+  }
+
   "LazyToplevel.chisel2firrtl" should "write graphML and every registry artefact to <out_dir>/artefacts" in {
     val top = new DiplomacyTop("a")
     top.chisel2firrtl()
@@ -46,6 +66,22 @@ class ToplevelArtefactsSpec extends AnyFlatSpec with Matchers with BeforeAndAfte
     val top = new DiplomacyTop("a", Seq(ArtefactKind.Regmap))
     top.chisel2firrtl()
     artefacts(top) shouldBe Map("Producer.0x2000000.0.regmap.json" -> "a regmap")
+  }
+
+  it should "write only the kinds EMITRTL_ARTEFACTS names" in {
+    val top = new EnvTop(Some("regmap"))
+    top.chisel2firrtl()
+    artefacts(top) shouldBe Map("Producer.0x2000000.0.regmap.json" -> "a regmap")
+  }
+
+  it should "fail on an unknown EMITRTL_ARTEFACTS kind, listing valid names, before elaboration" in {
+    var built = false
+    val top = new EnvTop(Some("regmap,bogus")) {
+      override lazy val lazyTop = { built = true; LazyModule(new Producer("a")(Parameters.empty)) }
+    }
+    val e = the[IllegalArgumentException] thrownBy top.chisel2firrtl()
+    e.getMessage should (include("bogus") and include("Valid names: regmap, graphml"))
+    built shouldBe false
   }
 
   it should "not leak one Top's artefacts into the next Top elaborated in the same JVM" in {
@@ -160,5 +196,26 @@ class SynthToplevelArtefactsSpec extends AnyFlatSpec with Matchers with BeforeAn
     val top = new StageTop(Seq(ArtefactKind.GraphML))
     top.chipyardAnno()
     artefacts(top.dir).keySet shouldBe Set("StageProducer.graphml")
+  }
+
+  /** A `StageTop` that sees `env` as its `EMITRTL_ARTEFACTS` value */
+  private class EnvStageTop(env: Option[String]) extends StageTop(Seq(ArtefactKind.GraphML)) {
+    override private[emitrtl] def artefactsEnv = env
+  }
+
+  it should "write only the kinds EMITRTL_ARTEFACTS names" in {
+    val top = new EnvStageTop(Some("regmap"))
+    top.chipyardAnno()
+    artefacts(top.dir) shouldBe Map("StageProducer.0x2000000.0.regmap.json" -> "stage regmap")
+  }
+
+  it should "fail on an unknown EMITRTL_ARTEFACTS kind, listing valid names, before elaboration" in {
+    var built = false
+    val top = new EnvStageTop(Some("bogus")) {
+      override lazy val lazyTop = { built = true; LazyModule(new StageProducer()(Parameters.empty)) }
+    }
+    val e = the[IllegalArgumentException] thrownBy top.chipyardAnno()
+    e.getMessage should (include("bogus") and include("Valid names: regmap, graphml"))
+    built shouldBe false
   }
 }
