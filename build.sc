@@ -1,141 +1,31 @@
-// import Mill dependency
+// Standalone build for developing emitrtl, checked out next to playground (see playground's ADR 0001).
+// Playground itself builds emitrtl from playground_modules.sc; this build adds formatting, linting and
+// strict compiler warnings on top of the same shared dependencies.
 import mill._
-import mill.define.Sources
-import mill.modules.Util
-import mill.scalalib.TestModule.ScalaTest
-import scalalib._
-import publish._
-// support BSP
-import mill.bsp._
-
-import scalafmt._
+import mill.scalalib._
+import mill.scalalib.scalafmt.ScalafmtModule
 import $ivy.`com.goyeau::mill-scalafix::0.3.1`
 import com.goyeau.mill.scalafix.ScalafixModule
 
-import $file.builddefs
+import $file.^.playground.{builddefs => playground_build}
+import $file.^.playground.playground_modules
 
-builddefs.ivys.checkOutDir()
+playground_build.ivys.checkOutDir()
 
-import $file.dependencies.cde.{build => cde_build}
-import $file.dependencies.`rocket-chip`.{common => rocketchip_common}
-import $file.dependencies.`berkeley-hardfloat`.{common => hardfloat_common}
-import $file.dependencies.diplomacy.{common => diplomacy_common}
+// Shared dependencies from ../playground. Not a RootModule: playground_modules also defines an
+// `emitrtl`, which builds playground's copy rather than this checkout.
+object shared extends playground_modules.PlaygroundModules
 
-object macros extends rocketchip_common.MacrosModule with SbtModule {
-  override def millSourcePath = os.pwd / "dependencies" / "rocket-chip" / "macros"
-  def scalaVersion: T[String] = T(builddefs.ivys.sv)
-  def scalaReflectIvy = builddefs.ivys.scalaReflect
-}
+object emitrtl extends playground_build.CommonModule with SbtModule with ScalafmtModule with ScalafixModule {
+  override def millSourcePath = os.pwd
 
-object ivys {
-  val cv = builddefs.ivys.cv
-}
+  // Chisel-version-specific sources (e.g. VerilatorSimulator), selected by USE_CHISEL7
+  override def sources = T.sources {
+    super.sources() :+ PathRef(
+      millSourcePath / "src" / "main" / (if (playground_build.ivys.useChisel7) "scala-chisel7" else "scala-chisel6")
+    )
+  }
 
-object mycde extends cde_build.CDE with PublishModule {
-  override def millSourcePath = os.pwd / "dependencies" / "cde" / "cde"
-  def scalaVersion: T[String] = T(builddefs.ivys.sv)
-}
-
-object mydiplomacy
-  extends diplomacy_common.DiplomacyModule
-  with builddefs.CommonModule {
-  override def millSourcePath = os.pwd / "dependencies" / "diplomacy" / "diplomacy"
-  override def scalaVersion   = builddefs.ivys.sv
-  def chiselModule            = None
-  def chiselPluginJar         = None
-  def chiselIvy               = Some(builddefs.ivys.chiselCrossVersions(ivys.cv)._1)
-  def chiselPluginIvy         = Some(builddefs.ivys.chiselCrossVersions(ivys.cv)._2)
-  def sourcecodeIvy           = builddefs.ivys.sourcecode
-  def cdeModule               = mycde
-}
-
-object myrocketchip extends rocketchip_common.RocketChipModule with SbtModule {
-
-  override def millSourcePath = os.pwd / "dependencies" / "rocket-chip"
-
-  override def scalaVersion = builddefs.ivys.sv
-
-  def chiselModule = None
-
-  def chiselPluginJar = None
-
-  def chiselIvy = Some(builddefs.ivys.chiselCrossVersions(ivys.cv)._1)
-
-  def chiselPluginIvy = Some(builddefs.ivys.chiselCrossVersions(ivys.cv)._2)
-
-  override def ivyDeps             = T(super.ivyDeps() ++ chiselIvy)
-  override def scalacPluginIvyDeps = T(super.scalacPluginIvyDeps() ++ chiselPluginIvy)
-
-  def macrosModule = macros
-
-  def hardfloatModule: ScalaModule = myhardfloat
-
-  def cdeModule: ScalaModule = mycde
-
-  def diplomacyModule: ScalaModule = mydiplomacy
-
-  def mainargsIvy = builddefs.ivys.mainargs
-
-  def json4sJacksonIvy = builddefs.ivys.json4sJackson
-
-}
-
-// UCB
-object myhardfloat extends hardfloat_common.HardfloatModule with PublishModule {
-  override def millSourcePath = os.pwd / "dependencies" / "berkeley-hardfloat" /"hardfloat"
-  def scalaVersion            = builddefs.ivys.sv
-
-  def chiselModule = None
-
-  def chiselPluginJar = None
-
-  def chiselIvy = Some(builddefs.ivys.chiselCrossVersions(ivys.cv)._1)
-
-  def chiselPluginIvy = Some(builddefs.ivys.chiselCrossVersions(ivys.cv)._2)
-
-  override def ivyDeps             = T(super.ivyDeps() ++ chiselIvy)
-  override def scalacPluginIvyDeps = T(super.scalacPluginIvyDeps() ++ chiselPluginIvy)
-  // remove test dep
-  override def allSourceFiles = T(
-    super.allSourceFiles().filterNot(_.path.last.contains("Tester")).filterNot(_.path.segments.contains("test")),
-  )
-
-  def publishVersion = de.tobiasroeser.mill.vcs.version.VcsVersion.vcsState().format()
-
-  def pomSettings = PomSettings(
-    description = artifactName(),
-    organization = "edu.berkeley.cs",
-    url = "http://chisel.eecs.berkeley.edu",
-    licenses = Seq(License.`BSD-3-Clause`),
-    versionControl = VersionControl.github("ucb-bar", "berkeley-hardfloat"),
-    developers = Seq(
-      Developer("jhauser-ucberkeley", "John Hauser", "https://www.colorado.edu/faculty/hauser/about/"),
-      Developer("aswaterman", "Andrew Waterman", "https://aspire.eecs.berkeley.edu/author/waterman/"),
-      Developer("yunsup", "Yunsup Lee", "https://aspire.eecs.berkeley.edu/author/yunsup/"),
-    ),
-  )
-}
-
-object chipyardAnnotations extends builddefs.CommonModule with SbtModule {
-  override def millSourcePath =
-    os.pwd / "dependencies" / "chipyard" / "tools" / (if (builddefs.ivys.useChisel7) "stage-chisel7" else "stage")
-  override def moduleDeps     = super.moduleDeps ++ Seq(myrocketchip)
-}
- 
-object chipyardTapeout extends builddefs.CommonModule with SbtModule {
-  override def millSourcePath = os.pwd / "dependencies" / "chipyard" / "tools" / "tapeout"
-  //override def millSourcePath = os.pwd / "dependencies" / "chipyard" / "tools" / "tapeout"
-  override def scalaVersion = builddefs.ivys.sv1 // stuck on chisel3 2.13.10
-  override def chiselIvy = Some(builddefs.ivys.chiselCrossVersions(builddefs.ivys.cv1)._1) // stuck on chisel3 and SFC
-  override def chiselPluginIvy = Some(builddefs.ivys.chiselCrossVersions(builddefs.ivys.cv1)._1)
-  //def playjsonIvy = ivys.playjson
-  def playjsonIvy = ivy"com.typesafe.play::play-json:2.9.2"
-  override def ivyDeps = T(super.ivyDeps() ++ Some(playjsonIvy))
-  override def moduleDeps = super.moduleDeps
-}
-
-
-trait ScalacOptions extends ScalaModule {
   override def scalacOptions = T {
     super.scalacOptions() ++ Seq(
       "-unchecked",
@@ -146,26 +36,15 @@ trait ScalacOptions extends ScalaModule {
       "-Xfatal-warnings",
       "-Ywarn-dead-code",
       "-Ywarn-unused",
-    )
-  }
-}
-
-object emitrtl
-  extends builddefs.CommonModule
-  with SbtModule
-  with ScalafmtModule
-  with ScalafixModule
-  with ScalacOptions {
-  override def millSourcePath = os.pwd
-
-  // Chisel-version-specific sources (e.g. VerilatorSimulator), selected by USE_CHISEL7
-  override def sources = T.sources {
-    super.sources() :+ PathRef(
-      millSourcePath / "src" / "main" / (if (builddefs.ivys.useChisel7) "scala-chisel7" else "scala-chisel6")
+      // Chisel 7 deprecates all of package firrtl, but ChipyardStage still returns firrtl.AnnotationSeq
+      "-Wconf:cat=deprecation&msg=All APIs in package firrtl are deprecated:s",
     )
   }
 
-  override def moduleDeps = super.moduleDeps ++ Seq(myrocketchip, chipyardAnnotations, chipyardTapeout)
+  override def moduleDeps =
+    super.moduleDeps ++ Seq(shared.mycde, shared.mydiplomacy, shared.myrocketchip, shared.chipyardAnnotations)
 
-  override def ivyDeps = T(super.ivyDeps() ++ Agg(builddefs.ivys.scalatest))
+  override def ivyDeps = T(super.ivyDeps() ++ Agg(playground_build.ivys.scalatest))
+
+  object test extends SbtModuleTests with TestModule.ScalaTest
 }
